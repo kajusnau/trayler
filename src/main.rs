@@ -17,14 +17,18 @@ use tokio::sync::mpsc;
     version,
     after_help = "\
 Clicking the icon opens a menu: the --option entries in order, then Exit
-(--exit-label). With --pid, Exit sends --exit-signal (default TERM) to that
-process, and the icon disappears when the process ends. Without --pid,
-trayler prints its own PID and Exit closes it.
+(--exit-label). With --pid or a command after --, Exit sends --exit-signal
+(default TERM) to that process, and the icon disappears when it ends. A
+command is stopped together with trayler, and trayler exits with its exit
+code. Without either, trayler prints its own PID and Exit closes it.
 
 Examples:
   trayler --icon media-record-symbolic --title Recording --pid \"$pid\" \\
           --option \"media-playback-stop-symbolic:Stop recording:pkill -INT recorder\" &
-  trayler --icon dialog-information --option \":Say hi:notify-send hi\" &"
+  trayler --icon dialog-information --option \":Say hi:notify-send hi\" &
+  trayler --icon media-record-symbolic --title Recording --exit-signal INT \\
+          -- gpu-screen-recorder -w portal -o capture.mkv",
+    group(clap::ArgGroup::new("target").args(["pid", "command"])),
 )]
 struct Cli {
     /// Icon theme name, for example media-record-symbolic
@@ -35,7 +39,7 @@ struct Cli {
     #[arg(long, value_name = "TEXT", default_value = "trayler")]
     title: String,
 
-    /// Process to follow; without it trayler prints its own PID and runs until Exit
+    /// Process to follow; with neither it nor a command, trayler prints its own PID and runs until Exit
     #[arg(long)]
     pid: Option<i32>,
 
@@ -47,9 +51,13 @@ struct Cli {
     #[arg(long, value_name = "TEXT", default_value = "Exit")]
     exit_label: String,
 
-    /// Signal the last menu entry sends to the followed process
-    #[arg(long, value_name = "SIGNAL", value_enum, default_value_t = ExitSignal::Term, requires = "pid")]
+    /// Signal the last menu entry sends to the followed process or command
+    #[arg(long, value_name = "SIGNAL", value_enum, default_value_t = ExitSignal::Term, requires = "target")]
     exit_signal: ExitSignal,
+
+    /// Command to run and follow; trayler exits with its exit code
+    #[arg(last = true, value_name = "COMMAND")]
+    command: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +142,13 @@ fn open_pidfd(raw: i32) -> Result<OwnedFd, String> {
     pidfd_open(pid, PidfdFlags::empty()).map_err(|e| format!("pid {raw}: {e}"))
 }
 
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
 struct Trayler {
     icon: String,
     title: String,
@@ -212,62 +227,112 @@ impl ksni::Tray for Trayler {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
 
-    let pidfd = match cli.pid {
-        Some(raw) => Some(Arc::new(open_pidfd(raw)?)),
-        None => {
-            println!("{}", std::process::id());
-            // stdout is block-buffered when piped; callers read the PID right away.
-            std::io::stdout().flush()?;
-            None
-        }
+    let mut child = None;
+    let pidfd = if let Some((program, args)) = cli.command.split_first() {
+        let mut spawned = tokio::process::Command::new(program)
+            .args(args)
+            .spawn()
+            .map_err(|e| format!("{program}: {e}"))?;
+        let pid = spawned
+            .id()
+            .ok_or("command exited before it could be followed")?;
+        let pidfd = match open_pidfd(pid as i32) {
+            Ok(pidfd) => pidfd,
+            Err(e) => {
+                // Dropping a tokio Child does not kill it.
+                let _ = spawned.start_kill();
+                let _ = spawned.wait().await;
+                return Err(e.into());
+            }
+        };
+        child = Some(spawned);
+        Some(Arc::new(pidfd))
+    } else if let Some(raw) = cli.pid {
+        Some(Arc::new(open_pidfd(raw)?))
+    } else {
+        println!("{}", std::process::id());
+        // stdout is block-buffered when piped; callers read the PID right away.
+        std::io::stdout().flush()?;
+        None
     };
+    // Only a command trayler started is stopped together with trayler.
+    let forward_to = child.as_ref().and(pidfd.clone());
 
     let (quit, mut quit_rx) = mpsc::unbounded_channel();
-    let handle = Trayler {
+    let exit_signal = cli.exit_signal.into();
+    let spawned = Trayler {
         icon: cli.icon,
         title: cli.title,
         options: cli.options,
         exit_label: cli.exit_label,
-        exit_signal: cli.exit_signal.into(),
+        exit_signal,
         quit,
         pidfd: pidfd.clone(),
     }
     .spawn()
-    .await?;
-
-    let process_exit = async {
-        match pidfd {
-            // A pidfd becomes readable when its process exits.
-            Some(pidfd) => {
-                // SAFETY: the AsyncFd owns the Arc, so the fd stays open while registered.
-                let fd = unsafe { AsyncFd::register(pidfd) }?;
-                fd.readable().await.map(|_| ())
+    .await;
+    let handle = match spawned {
+        Ok(handle) => handle,
+        Err(e) => {
+            // Without a tray there is no way to stop the command, so do not orphan it.
+            if let (Some(mut child), Some(pidfd)) = (child, &forward_to) {
+                let _ = pidfd_send_signal(pidfd, exit_signal);
+                let _ = child.wait().await;
             }
-            None => std::future::pending().await,
+            return Err(e.into());
         }
     };
 
-    tokio::select! {
-        result = process_exit => result?,
-        _ = quit_rx.recv() => {}
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-    }
+    let followed = async {
+        match (child.as_mut(), pidfd) {
+            (Some(child), _) => child.wait().await.map(exit_code),
+            // A pidfd becomes readable when its process exits.
+            (None, Some(pidfd)) => {
+                // SAFETY: the AsyncFd owns the Arc, so the fd stays open while registered.
+                let fd = unsafe { AsyncFd::register(pidfd) }?;
+                fd.readable().await.map(|_| 0)
+            }
+            (None, None) => std::future::pending().await,
+        }
+    };
+    tokio::pin!(followed);
+
+    let forward = |signal: Signal| match &forward_to {
+        Some(pidfd) => {
+            if let Err(e) = pidfd_send_signal(pidfd, signal) {
+                eprintln!("trayler: {e}");
+            }
+            true
+        }
+        None => false,
+    };
+
+    let code = loop {
+        tokio::select! {
+            result = &mut followed => break result?,
+            _ = quit_rx.recv() => break 0,
+            _ = term.recv() => if !forward(Signal::TERM) { break 0 },
+            _ = int.recv() => if !forward(Signal::INT) { break 0 },
+        }
+    };
 
     handle.shutdown().await;
-    Ok(())
+    Ok(code)
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = parse_cli();
-    if let Err(e) = run(cli).await {
-        eprintln!("trayler: {e}");
-        std::process::exit(1);
+    match run(cli).await {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("trayler: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -381,6 +446,29 @@ mod tests {
     #[test]
     fn rejects_unknown_exit_signals() {
         assert!(parse(&["--icon", "x", "--pid", "1", "--exit-signal", "SIGTERM"]).is_err());
+    }
+
+    #[test]
+    fn exit_code_passes_through_the_command_code() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit_code(std::process::ExitStatus::from_raw(3 << 8)), 3);
+    }
+
+    #[test]
+    fn exit_code_maps_signals_like_a_shell() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit_code(std::process::ExitStatus::from_raw(15)), 143);
+    }
+
+    #[test]
+    fn accepts_a_command_after_double_dash() {
+        let cli = parse(&["--icon", "x", "--exit-signal", "INT", "--", "sleep", "5"]).unwrap();
+        assert_eq!(cli.command, ["sleep", "5"]);
+    }
+
+    #[test]
+    fn rejects_pid_together_with_a_command() {
+        assert!(parse(&["--icon", "x", "--pid", "1", "--", "sleep", "5"]).is_err());
     }
 
     #[test]
