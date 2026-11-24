@@ -30,6 +30,9 @@ Examples:
   trayler --config recording.toml --exit-signal INT \\
           -- gpu-screen-recorder -w portal -o capture.mkv",
     group(clap::ArgGroup::new("target").args(["pid", "command"])),
+    args_conflicts_with_subcommands = true,
+    subcommand_value_name = "ACTION",
+    subcommand_help_heading = "Actions",
 )]
 struct Cli {
     /// TOML file with the menu and settings; - reads stdin (see trayler init)
@@ -59,6 +62,33 @@ struct Cli {
     /// Command to run and follow; trayler exits with its exit code
     #[arg(last = true, value_name = "COMMAND")]
     command: Vec<String>,
+
+    #[command(subcommand)]
+    action: Option<Action>,
+}
+
+#[derive(clap::Subcommand)]
+enum Action {
+    /// Write a commented example config; - prints it instead
+    Init {
+        #[arg(value_name = "PATH", default_value = "trayler.toml")]
+        path: PathBuf,
+    },
+}
+
+const EXAMPLE: &str = include_str!("../example.toml");
+
+fn init(path: &Path) -> Result<(), String> {
+    if path == Path::new("-") {
+        print!("{EXAMPLE}");
+        return Ok(());
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(EXAMPLE.as_bytes()))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum, Deserialize)]
@@ -505,6 +535,13 @@ async fn main() {
         Err(_) => {}
     }
     let cli = parse_cli();
+    if let Some(Action::Init { path }) = &cli.action {
+        if let Err(e) = init(path) {
+            eprintln!("trayler: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     match run(cli).await {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -548,6 +585,55 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("trayler").chain(args.iter().copied()))
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trayler-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("trayler.toml")
+    }
+
+    #[test]
+    fn the_example_is_a_valid_config() {
+        let config = load_config("example.toml", EXAMPLE).unwrap();
+        assert_eq!(config.entries.len(), 3);
+        assert!(matches!(config.entries[1], Entry::Separator {}));
+        assert!(matches!(
+            config.entries[2],
+            Entry::Toggle { checked: false, .. }
+        ));
+        assert!(settings(&parse(&[]).unwrap(), config).is_ok());
+    }
+
+    #[test]
+    fn init_writes_the_example() {
+        let path = scratch("writes");
+        init(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), EXAMPLE);
+    }
+
+    #[test]
+    fn init_does_not_overwrite() {
+        let path = scratch("keeps");
+        std::fs::write(&path, "mine").unwrap();
+        assert!(init(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[test]
+    fn parses_init_with_a_default_path() {
+        let cli = parse(&["init"]).unwrap();
+        assert!(
+            matches!(cli.action, Some(Action::Init { ref path }) if path == Path::new("trayler.toml"))
+        );
+        let cli = parse(&["init", "-"]).unwrap();
+        assert!(matches!(cli.action, Some(Action::Init { ref path }) if path == Path::new("-")));
+    }
+
+    #[test]
+    fn init_takes_no_tray_flags() {
+        assert!(parse(&["--icon", "x", "init"]).is_err());
     }
 
     #[test]

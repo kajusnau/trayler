@@ -1,0 +1,35 @@
+# trayler config. Run it with: trayler --config trayler.toml [--pid PID | -- COMMAND]
+# Flags on the command line override the values here.
+
+# Icon theme name of the tray icon.
+icon = "media-record-symbolic"
+
+# Title and tooltip of the icon. Default: "trayler".
+title = "trayler"
+
+# The last menu entry. With --pid or a command after --, it sends `signal` to
+# that process; otherwise it closes trayler.
+[exit]
+label = "Exit"
+# TERM (default), INT, HUP, QUIT, KILL, USR1 or USR2. Only with --pid or a command.
+# signal = "INT"
+
+# Menu entries, listed top to bottom as they are written here.
+# `type` is "button" (the default), "toggle" or "separator".
+
+# A button runs `command` with `sh -c`. `icon` is optional.
+[[entry]]
+label = "Open Videos"
+icon = "folder-videos-symbolic"
+command = "xdg-open ~/Videos"
+
+[[entry]]
+type = "separator"
+
+# A toggle is a checkbox. Each click runs `command` with "on" or "off" as $1.
+# `checked` (default false) is the starting state.
+[[entry]]
+type = "toggle"
+label = "Do not disturb"
+checked = false
+command = "notify-send \"Do not disturb: $1\""

@@ -33,6 +33,9 @@ supported.
 
 ## Config
 
+`trayler init` writes a commented example (the same as `example.toml` in the repository) to `./trayler.toml` (or the path you give; `-` prints it). It never
+overwrites a file.
+
 ```toml
 icon = "media-record-symbolic"
 title = "Recording"
