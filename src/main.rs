@@ -1,4 +1,13 @@
+use std::io::Write;
+use std::os::fd::OwnedFd;
+use std::process::Command;
+use std::sync::Arc;
+
 use clap::Parser;
+use ksni::menu::StandardItem;
+use ksni::{MenuItem, ToolTip, TrayMethods};
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::mpsc;
 
 /// A configurable tray icon and menu for any process
 #[derive(Parser)]
@@ -60,8 +69,126 @@ fn parse_cli() -> Cli {
     })
 }
 
-fn main() {
-    let _cli = parse_cli();
+// ksni reads `_` as an access-key marker; doubling keeps it literal.
+fn menu_label(label: &str) -> String {
+    label.replace('_', "__")
+}
+
+fn spawn_command(command: &str) {
+    match Command::new("sh").arg("-c").arg(command).spawn() {
+        // Wait on a thread so the finished child is reaped instead of left a zombie.
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => eprintln!("trayler: {command}: {e}"),
+    }
+}
+
+struct Trayler {
+    icon: String,
+    title: String,
+    options: Vec<MenuOption>,
+    quit: mpsc::UnboundedSender<()>,
+    #[allow(dead_code)]
+    pidfd: Option<Arc<OwnedFd>>,
+}
+
+impl Trayler {
+    fn exit(&self) {
+        let _ = self.quit.send(());
+    }
+}
+
+impl ksni::Tray for Trayler {
+    const MENU_ON_ACTIVATE: bool = true;
+
+    fn id(&self) -> String {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    fn icon_name(&self) -> String {
+        self.icon.clone()
+    }
+
+    fn tool_tip(&self) -> ToolTip {
+        ToolTip {
+            title: self.title.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        let mut items: Vec<MenuItem<Self>> = self
+            .options
+            .iter()
+            .map(|option| {
+                let command = option.command.clone();
+                StandardItem {
+                    label: menu_label(&option.label),
+                    activate: Box::new(move |_: &mut Self| spawn_command(&command)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        if !items.is_empty() {
+            items.push(MenuItem::Separator);
+        }
+        items.push(
+            StandardItem {
+                label: "Exit".into(),
+                activate: Box::new(|this: &mut Self| this.exit()),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items
+    }
+}
+
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+
+    let pidfd: Option<Arc<OwnedFd>> = None;
+    if pidfd.is_none() {
+        println!("{}", std::process::id());
+        // stdout is block-buffered when piped; callers read the PID right away.
+        std::io::stdout().flush()?;
+    }
+
+    let (quit, mut quit_rx) = mpsc::unbounded_channel();
+    let handle = Trayler {
+        icon: cli.icon,
+        title: cli.title,
+        options: cli.options,
+        quit,
+        pidfd,
+    }
+    .spawn()
+    .await?;
+
+    tokio::select! {
+        _ = quit_rx.recv() => {}
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+
+    handle.shutdown().await;
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let cli = parse_cli();
+    if let Err(e) = run(cli).await {
+        eprintln!("trayler: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +231,12 @@ mod tests {
     #[test]
     fn rejects_empty_command() {
         assert!(parse_option("Stop recording=").is_err());
+    }
+
+    #[test]
+    fn escapes_underscores_in_labels() {
+        assert_eq!(menu_label("save_as_mp4"), "save__as__mp4");
+        assert_eq!(menu_label("Stop recording"), "Stop recording");
     }
 
     #[test]
