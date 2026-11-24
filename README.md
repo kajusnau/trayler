@@ -15,7 +15,7 @@ just as well.
 ```sh
 gpu-screen-recorder -w portal -o capture.mkv &
 trayler --icon media-record-symbolic --title Recording --pid $! \
-        --option "Stop recording=pkill -INT -f gpu-screen-recorder" &
+        --option "media-playback-stop-symbolic:Stop recording:pkill -INT -f gpu-screen-recorder" &
 ```
 
 | Flag | Meaning |
@@ -23,7 +23,7 @@ trayler --icon media-record-symbolic --title Recording --pid $! \
 | `--icon NAME` | required; icon theme name, such as `media-record-symbolic` |
 | `--title TEXT` | name and tooltip of the icon (default `trayler`) |
 | `--pid PID` | process to follow; **Exit** sends it SIGTERM, and the icon disappears when it ends |
-| `--option LABEL=COMMAND` | menu entry; the command runs with `sh -c`. Repeat for more entries |
+| `--option ICON:LABEL:COMMAND` | menu entry with an optional icon (`:Label:command` for none); the command runs with `sh -c`. Repeat for more entries |
 
 Without `--pid`, trayler prints its own PID and stays until you choose **Exit** or stop it with `kill`. If the followed process ignores SIGTERM, **Exit** leaves it, and trayler, running.
 

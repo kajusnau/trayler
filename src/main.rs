@@ -22,8 +22,8 @@ the process ends. Without --pid, trayler prints its own PID and Exit closes it.
 
 Examples:
   trayler --icon media-record-symbolic --title Recording --pid \"$pid\" \\
-          --option \"Stop recording=pkill -INT recorder\" &
-  trayler --icon dialog-information --option \"Say hi=notify-send hi\" &"
+          --option \"media-playback-stop-symbolic:Stop recording:pkill -INT recorder\" &
+  trayler --icon dialog-information --option \":Say hi:notify-send hi\" &"
 )]
 struct Cli {
     /// Icon theme name, for example media-record-symbolic
@@ -38,19 +38,24 @@ struct Cli {
     #[arg(long)]
     pid: Option<i32>,
 
-    /// Menu entry, run with `sh -c` when chosen; repeatable
-    #[arg(long = "option", value_name = "LABEL=COMMAND", value_parser = parse_option)]
+    /// Menu entry; ICON may be empty, COMMAND runs with `sh -c`; repeatable
+    #[arg(long = "option", value_name = "ICON:LABEL:COMMAND", value_parser = parse_option)]
     options: Vec<MenuOption>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct MenuOption {
+    icon: String,
     label: String,
     command: String,
 }
 
 fn parse_option(s: &str) -> Result<MenuOption, String> {
-    let (label, command) = s.split_once('=').ok_or("expected LABEL=COMMAND")?;
+    let mut parts = s.splitn(3, ':');
+    let (Some(icon), Some(label), Some(command)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err("expected ICON:LABEL:COMMAND".into());
+    };
     if label.is_empty() {
         return Err("label is empty".into());
     }
@@ -58,6 +63,7 @@ fn parse_option(s: &str) -> Result<MenuOption, String> {
         return Err("command is empty".into());
     }
     Ok(MenuOption {
+        icon: icon.into(),
         label: label.into(),
         command: command.into(),
     })
@@ -147,6 +153,7 @@ impl ksni::Tray for Trayler {
                 let command = option.command.clone();
                 StandardItem {
                     label: menu_label(&option.label),
+                    icon_name: option.icon.clone(),
                     activate: Box::new(move |_: &mut Self| spawn_command(&command)),
                     ..Default::default()
                 }
@@ -229,42 +236,56 @@ async fn main() {
 mod tests {
     use super::*;
 
-    fn option(label: &str, command: &str) -> MenuOption {
+    fn option(icon: &str, label: &str, command: &str) -> MenuOption {
         MenuOption {
+            icon: icon.into(),
             label: label.into(),
             command: command.into(),
         }
     }
 
     #[test]
-    fn splits_label_and_command() {
+    fn splits_icon_label_and_command() {
         assert_eq!(
-            parse_option("Stop recording=pkill -INT recorder"),
-            Ok(option("Stop recording", "pkill -INT recorder"))
+            parse_option("media-playback-stop-symbolic:Stop recording:pkill -INT recorder"),
+            Ok(option(
+                "media-playback-stop-symbolic",
+                "Stop recording",
+                "pkill -INT recorder"
+            ))
         );
     }
 
     #[test]
-    fn keeps_equals_signs_in_the_command() {
+    fn allows_an_empty_icon() {
         assert_eq!(
-            parse_option("Run=env FOO=bar baz"),
-            Ok(option("Run", "env FOO=bar baz"))
+            parse_option(":Open Videos:xdg-open ~/Videos"),
+            Ok(option("", "Open Videos", "xdg-open ~/Videos"))
         );
     }
 
     #[test]
-    fn rejects_missing_equals() {
+    fn keeps_colons_in_the_command() {
+        assert_eq!(
+            parse_option(":Open site:xdg-open https://example.com:8080"),
+            Ok(option("", "Open site", "xdg-open https://example.com:8080"))
+        );
+    }
+
+    #[test]
+    fn rejects_fewer_than_two_colons() {
+        assert!(parse_option("Stop recording:pkill recorder").is_err());
         assert!(parse_option("Stop recording").is_err());
     }
 
     #[test]
     fn rejects_empty_label() {
-        assert!(parse_option("=pkill -INT recorder").is_err());
+        assert!(parse_option("icon::pkill -INT recorder").is_err());
     }
 
     #[test]
     fn rejects_empty_command() {
-        assert!(parse_option("Stop recording=").is_err());
+        assert!(parse_option("icon:Stop recording:").is_err());
     }
 
     #[test]
