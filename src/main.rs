@@ -3,7 +3,7 @@ use std::os::fd::OwnedFd;
 use std::process::Command;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, ToolTip, TrayMethods};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
@@ -326,6 +326,30 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Used by the package build; an env var keeps it out of --help and completions.
+    match std::env::var("TRAYLER_GENERATE").as_deref() {
+        Ok("man") => {
+            if let Err(e) = clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout()) {
+                eprintln!("trayler: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(shell) => {
+            let Ok(shell) = shell.parse::<clap_complete::Shell>() else {
+                eprintln!("trayler: TRAYLER_GENERATE must be bash, zsh, fish or man");
+                std::process::exit(1);
+            };
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "trayler",
+                &mut std::io::stdout(),
+            );
+            return;
+        }
+        Err(_) => {}
+    }
     let cli = parse_cli();
     match run(cli).await {
         Ok(code) => std::process::exit(code),
@@ -417,7 +441,6 @@ mod tests {
 
     #[test]
     fn cli_definition_is_valid() {
-        use clap::CommandFactory;
         Cli::command().debug_assert();
     }
 
@@ -469,6 +492,11 @@ mod tests {
     #[test]
     fn rejects_pid_together_with_a_command() {
         assert!(parse(&["--icon", "x", "--pid", "1", "--", "sleep", "5"]).is_err());
+    }
+
+    #[test]
+    fn icon_is_still_required_otherwise() {
+        assert!(parse(&["--title", "x"]).is_err());
     }
 
     #[test]

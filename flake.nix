@@ -1,5 +1,5 @@
 {
-  description = "Tray icon with a menu of commands for a running process";
+  description = "A configurable tray icon and menu for any process";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
