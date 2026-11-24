@@ -16,9 +16,10 @@ use tokio::sync::mpsc;
 #[command(
     version,
     after_help = "\
-Clicking the icon opens a menu: the --option entries in order, then Exit.
-With --pid, Exit sends SIGTERM to that process, and the icon disappears when
-the process ends. Without --pid, trayler prints its own PID and Exit closes it.
+Clicking the icon opens a menu: the --option entries in order, then Exit
+(--exit-label). With --pid, Exit sends --exit-signal (default TERM) to that
+process, and the icon disappears when the process ends. Without --pid,
+trayler prints its own PID and Exit closes it.
 
 Examples:
   trayler --icon media-record-symbolic --title Recording --pid \"$pid\" \\
@@ -41,6 +42,14 @@ struct Cli {
     /// Menu entry; ICON may be empty, COMMAND runs with `sh -c`; repeatable
     #[arg(long = "option", value_name = "ICON:LABEL:COMMAND", value_parser = parse_option)]
     options: Vec<MenuOption>,
+
+    /// Text of the last menu entry
+    #[arg(long, value_name = "TEXT", default_value = "Exit")]
+    exit_label: String,
+
+    /// Signal the last menu entry sends to the followed process
+    #[arg(long, value_name = "SIGNAL", value_enum, default_value_t = ExitSignal::Term, requires = "pid")]
+    exit_signal: ExitSignal,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +57,32 @@ struct MenuOption {
     icon: String,
     label: String,
     command: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
+#[value(rename_all = "UPPER")]
+enum ExitSignal {
+    Term,
+    Int,
+    Hup,
+    Quit,
+    Kill,
+    Usr1,
+    Usr2,
+}
+
+impl From<ExitSignal> for Signal {
+    fn from(signal: ExitSignal) -> Self {
+        match signal {
+            ExitSignal::Term => Signal::TERM,
+            ExitSignal::Int => Signal::INT,
+            ExitSignal::Hup => Signal::HUP,
+            ExitSignal::Quit => Signal::QUIT,
+            ExitSignal::Kill => Signal::KILL,
+            ExitSignal::Usr1 => Signal::USR1,
+            ExitSignal::Usr2 => Signal::USR2,
+        }
+    }
 }
 
 fn parse_option(s: &str) -> Result<MenuOption, String> {
@@ -103,6 +138,8 @@ struct Trayler {
     icon: String,
     title: String,
     options: Vec<MenuOption>,
+    exit_label: String,
+    exit_signal: Signal,
     quit: mpsc::UnboundedSender<()>,
     pidfd: Option<Arc<OwnedFd>>,
 }
@@ -112,7 +149,7 @@ impl Trayler {
         match &self.pidfd {
             // trayler exits once the pidfd reports the process gone.
             Some(pidfd) => {
-                if let Err(e) = pidfd_send_signal(pidfd, Signal::TERM) {
+                if let Err(e) = pidfd_send_signal(pidfd, self.exit_signal) {
                     eprintln!("trayler: {e}");
                 }
             }
@@ -165,7 +202,7 @@ impl ksni::Tray for Trayler {
         }
         items.push(
             StandardItem {
-                label: "Exit".into(),
+                label: menu_label(&self.exit_label),
                 activate: Box::new(|this: &mut Self| this.exit()),
                 ..Default::default()
             }
@@ -194,6 +231,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         icon: cli.icon,
         title: cli.title,
         options: cli.options,
+        exit_label: cli.exit_label,
+        exit_signal: cli.exit_signal.into(),
         quit,
         pidfd: pidfd.clone(),
     }
@@ -315,5 +354,38 @@ mod tests {
     fn cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("trayler").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn exit_defaults() {
+        let cli = parse(&["--icon", "x"]).unwrap();
+        assert_eq!(cli.exit_label, "Exit");
+        assert_eq!(cli.exit_signal, ExitSignal::Term);
+    }
+
+    #[test]
+    fn accepts_exit_signal_with_pid() {
+        let cli = parse(&["--icon", "x", "--pid", "1", "--exit-signal", "INT"]).unwrap();
+        assert_eq!(cli.exit_signal, ExitSignal::Int);
+    }
+
+    #[test]
+    fn rejects_exit_signal_without_a_target() {
+        assert!(parse(&["--icon", "x", "--exit-signal", "INT"]).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_exit_signals() {
+        assert!(parse(&["--icon", "x", "--pid", "1", "--exit-signal", "SIGTERM"]).is_err());
+    }
+
+    #[test]
+    fn maps_exit_signals() {
+        assert_eq!(Signal::from(ExitSignal::Usr1), Signal::USR1);
+        assert_eq!(Signal::from(ExitSignal::Kill), Signal::KILL);
     }
 }

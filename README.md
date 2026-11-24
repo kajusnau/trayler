@@ -24,6 +24,8 @@ trayler --icon media-record-symbolic --title Recording --pid $! \
 | `--title TEXT` | name and tooltip of the icon (default `trayler`) |
 | `--pid PID` | process to follow; **Exit** sends it SIGTERM, and the icon disappears when it ends |
 | `--option ICON:LABEL:COMMAND` | menu entry with an optional icon (`:Label:command` for none); the command runs with `sh -c`. Repeat for more entries |
+| `--exit-label TEXT` | text of the last menu entry (default `Exit`) |
+| `--exit-signal SIGNAL` | signal the last entry sends with `--pid`: `TERM` (default), `INT`, `HUP`, `QUIT`, `KILL`, `USR1`, `USR2` |
 
 Without `--pid`, trayler prints its own PID and stays until you choose **Exit** or stop it with `kill`. If the followed process ignores SIGTERM, **Exit** leaves it, and trayler, running.
 
