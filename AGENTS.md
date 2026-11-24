@@ -1,8 +1,10 @@
 # trayler — instructions for coding agents
 
 trayler is a small Rust CLI that shows a tray icon (StatusNotifierItem) with a menu of user-given commands and an
-Exit entry, optionally following a process given with `--pid`. All code is in `src/main.rs`; the Nix build is in
-`package.nix` and `flake.nix`.
+Exit entry, optionally following a process given with `--pid` or started after `--`. The code is in `src/`:
+`main.rs` (startup and the event loop), `cli.rs` (flags), `config.rs` (TOML config and `init`), `tray.rs` (icon and
+menu) and `process.rs` (pidfd and exit codes); each file keeps its own tests. The Nix build is in `package.nix` and
+`flake.nix`.
 
 ## Before you commit
 
