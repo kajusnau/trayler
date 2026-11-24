@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in trayler does not work as documented
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: trayler version
+      description: Output of `trayler --version`
+      placeholder: trayler 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop / panel
+      description: GNOME is not supported.
+      options:
+        - COSMIC
+        - KDE Plasma
+        - Other (name it below)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command line
+      description: The exact trayler command you ran
+      render: sh
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: The TOML config, if you used one
+      render: toml
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Anything trayler printed
+      render: text
