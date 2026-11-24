@@ -6,14 +6,14 @@ mod tray;
 use std::io::Write;
 use std::sync::Arc;
 
-use clap::CommandFactory;
+use clap::{CommandFactory, Parser};
 use ksni::TrayMethods;
 use rustix::process::{pidfd_send_signal, Signal};
 use tokio::io::unix::AsyncFd;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
-use cli::{parse_cli, Action, Cli};
+use cli::{Action, Cli};
 use config::{init, read_config, settings, Config};
 use process::{exit_code, open_pidfd};
 use tray::Trayler;
@@ -146,7 +146,7 @@ async fn main() {
         }
         Err(_) => {}
     }
-    let cli = parse_cli();
+    let cli = Cli::parse();
     if let Some(Action::Init { path }) = &cli.action {
         if let Err(e) = init(path) {
             eprintln!("trayler: {e}");

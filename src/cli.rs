@@ -94,14 +94,6 @@ impl From<ExitSignal> for Signal {
     }
 }
 
-// clap exits 2 on usage errors; the spec wants 1 for every error.
-pub(crate) fn parse_cli() -> Cli {
-    Cli::try_parse().unwrap_or_else(|e| {
-        let _ = e.print();
-        std::process::exit(if e.use_stderr() { 1 } else { 0 });
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(std::iter::once("trayler").chain(args.iter().copied()))
