@@ -6,6 +6,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, ToolTip, TrayMethods};
+use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
+use tokio::io::unix::AsyncFd;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
@@ -84,18 +86,34 @@ fn spawn_command(command: &str) {
     }
 }
 
+fn open_pidfd(raw: i32) -> Result<OwnedFd, String> {
+    // Pid::from_raw debug-asserts non-negative, so the sign check must come first.
+    let pid =
+        if raw > 0 { Pid::from_raw(raw) } else { None }.ok_or(format!("invalid pid {raw}"))?;
+    pidfd_open(pid, PidfdFlags::empty()).map_err(|e| format!("pid {raw}: {e}"))
+}
+
 struct Trayler {
     icon: String,
     title: String,
     options: Vec<MenuOption>,
     quit: mpsc::UnboundedSender<()>,
-    #[allow(dead_code)]
     pidfd: Option<Arc<OwnedFd>>,
 }
 
 impl Trayler {
     fn exit(&self) {
-        let _ = self.quit.send(());
+        match &self.pidfd {
+            // trayler exits once the pidfd reports the process gone.
+            Some(pidfd) => {
+                if let Err(e) = pidfd_send_signal(pidfd, Signal::TERM) {
+                    eprintln!("trayler: {e}");
+                }
+            }
+            None => {
+                let _ = self.quit.send(());
+            }
+        }
     }
 }
 
@@ -154,12 +172,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
 
-    let pidfd: Option<Arc<OwnedFd>> = None;
-    if pidfd.is_none() {
-        println!("{}", std::process::id());
-        // stdout is block-buffered when piped; callers read the PID right away.
-        std::io::stdout().flush()?;
-    }
+    let pidfd = match cli.pid {
+        Some(raw) => Some(Arc::new(open_pidfd(raw)?)),
+        None => {
+            println!("{}", std::process::id());
+            // stdout is block-buffered when piped; callers read the PID right away.
+            std::io::stdout().flush()?;
+            None
+        }
+    };
 
     let (quit, mut quit_rx) = mpsc::unbounded_channel();
     let handle = Trayler {
@@ -167,12 +188,25 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         title: cli.title,
         options: cli.options,
         quit,
-        pidfd,
+        pidfd: pidfd.clone(),
     }
     .spawn()
     .await?;
 
+    let process_exit = async {
+        match pidfd {
+            // A pidfd becomes readable when its process exits.
+            Some(pidfd) => {
+                // SAFETY: the AsyncFd owns the Arc, so the fd stays open while registered.
+                let fd = unsafe { AsyncFd::register(pidfd) }?;
+                fd.readable().await.map(|_| ())
+            }
+            None => std::future::pending().await,
+        }
+    };
+
     tokio::select! {
+        result = process_exit => result?,
         _ = quit_rx.recv() => {}
         _ = term.recv() => {}
         _ = int.recv() => {}
@@ -237,6 +271,23 @@ mod tests {
     fn escapes_underscores_in_labels() {
         assert_eq!(menu_label("save_as_mp4"), "save__as__mp4");
         assert_eq!(menu_label("Stop recording"), "Stop recording");
+    }
+
+    #[test]
+    fn opens_a_running_process() {
+        assert!(open_pidfd(std::process::id() as i32).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_missing_process() {
+        // PIDs above pid_max (at most 2^22) never exist.
+        assert!(open_pidfd(i32::MAX).is_err());
+    }
+
+    #[test]
+    fn rejects_non_positive_pids() {
+        assert!(open_pidfd(0).is_err());
+        assert!(open_pidfd(-1).is_err());
     }
 
     #[test]
