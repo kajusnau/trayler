@@ -1,0 +1,13 @@
+[package]
+name = "trayler"
+version = "0.1.0"
+edition = "2021"
+description = "Tray icon with a menu of commands for a running process"
+license = "GPL-3.0-or-later"
+authors = ["Kajus Naujokaitis"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+ksni = "0.3.3"
+rustix = { version = "1.1", features = ["process"] }
+tokio = { version = "1", features = ["macros", "rt", "net", "signal", "sync"] }
