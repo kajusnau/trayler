@@ -2,33 +2,66 @@
 
 A configurable tray icon and menu for any process.
 
-Give `trayler` an icon, a few menu entries and, optionally, a running process's PID or a command to start.
-It adds a tray applet; click it and you get your entries plus **Exit**.
-When the process ends, the tray applet goes with it.
+Programs such as screen recorders, long builds or sync scripts often run with no tray presence at all. `trayler`
+gives them one: point it at a running process with `--pid`, or let it start a command given after `--`, and it
+trails that process with a tray icon and menu entries from a small TOML config, plus **Exit**. **Exit** stops the
+process, and when the process ends on its own, the icon goes with it.
 
 ## Usage
 
 ```sh
-trayler --icon media-record-symbolic --title Recording --exit-signal INT \
-        --option "media-playback-stop-symbolic:Stop recording:pkill -INT -f gpu-screen-recorder" \
+trayler --config recording.toml --exit-signal INT \
         -- gpu-screen-recorder -w portal -o capture.mkv
 ```
 
 | Flag                          | Meaning                                                                                                               |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `--icon NAME`                 | required; icon theme name, such as `media-record-symbolic`                                                            |
+| `--config FILE`               | TOML file with the menu and settings; `-` reads stdin                                                                 |
+| `--icon NAME`                 | icon theme name, such as `media-record-symbolic`; required here or in the config                                      |
 | `--title TEXT`                | name and tooltip of the icon (default `trayler`)                                                                      |
 | `--pid PID`                   | process to follow; **Exit** sends it the exit signal, and the icon disappears when it ends                            |
 | `-- COMMAND [ARGS]`           | run the command and follow it; **Exit** signals it, stopping trayler stops it, and trayler exits with its exit code   |
-| `--option ICON:LABEL:COMMAND` | menu entry with an optional icon (`:Label:command` for none); the command runs with `sh -c`. Repeat for more entries  |
-| `--toggle ICON:LABEL:COMMAND` | checkbox entry; the command gets `on` or `off` as `$1`. `+LABEL` starts it checked. Kept in order with `--option` |
 | `--exit-label TEXT`           | text of the last menu entry (default `Exit`)                                                                          |
 | `--exit-signal SIGNAL`        | signal the last entry sends with `--pid` or a command: `TERM` (default), `INT`, `HUP`, `QUIT`, `KILL`, `USR1`, `USR2` |
 
 Without `--pid` or a command, trayler prints its own PID and stays until you choose **Exit** or stop it with `kill`. If the followed process ignores the exit signal, **Exit** leaves it, and trayler, running.
 
+Flags override the same settings in the config.
+
 trayler needs a tray that speaks StatusNotifierItem, as COSMIC, KDE Plasma and most Wayland panels do. GNOME is not
 supported.
+
+## Config
+
+```toml
+icon = "media-record-symbolic"
+title = "Recording"
+
+[exit]
+label = "Stop"
+
+[[entry]]
+label = "Open Videos"
+icon = "folder-videos-symbolic"
+command = "xdg-open ~/Videos"
+
+[[entry]]
+type = "toggle"
+label = "Do not disturb"
+command = "notify-send \"Do not disturb: $1\""
+```
+
+The menu lists the entries top to bottom as they are written in the config, then **Exit**. Each entry has a
+`type`:
+
+| Type                 | Keys                                    | Behaviour                                                         |
+| -------------------- | --------------------------------------- | ----------------------------------------------------------------- |
+| `button` (default)   | `label`, `icon`, `command`              | runs the command with `sh -c`                                     |
+| `toggle`             | `label`, `icon`, `command`, `checked`   | checkbox; the command gets `on` or `off` as `$1`                  |
+| `separator`          | none                                    | a separator line                                                  |
+
+`[exit]` takes `label` and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
+`--config -` the config is read from stdin, so a command started after `--` gets an empty stdin.
 
 ## Building
 

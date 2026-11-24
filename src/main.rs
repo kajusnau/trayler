@@ -1,12 +1,14 @@
 use std::io::Write;
 use std::os::fd::OwnedFd;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, Parser};
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, TrayMethods};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
+use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -16,68 +18,52 @@ use tokio::sync::mpsc;
 #[command(
     version,
     after_help = "\
-Clicking the icon opens a menu: the --option and --toggle entries in order,
-then Exit
-(--exit-label). With --pid or a command after --, Exit sends --exit-signal
-(default TERM) to that process, and the icon disappears when it ends. A
-command is stopped together with trayler, and trayler exits with its exit
-code. Without either, trayler prints its own PID and Exit closes it.
+Clicking the icon opens a menu: the entries from --config in order, then
+Exit (--exit-label). With --pid or a command after --, Exit sends
+--exit-signal (default TERM) to that process, and the icon disappears when
+it ends. A command is stopped together with trayler, and trayler exits with
+its exit code. Without either, trayler prints its own PID and Exit closes it.
+Flags override the same settings in the config.
 
 Examples:
-  trayler --icon media-record-symbolic --title Recording --pid \"$pid\" \\
-          --option \"media-playback-stop-symbolic:Stop recording:pkill -INT recorder\" &
-  trayler --icon dialog-information --option \":Say hi:notify-send hi\" &
-  trayler --icon media-record-symbolic --title Recording --exit-signal INT \\
-          -- gpu-screen-recorder -w portal -o capture.mkv
-  trayler --icon drive-removable-media-symbolic \
-          --toggle ':+Automount:automount-ctl $1' &",
+  trayler --icon media-record-symbolic --title Recording --pid \"$pid\" &
+  trayler --config recording.toml --exit-signal INT \\
+          -- gpu-screen-recorder -w portal -o capture.mkv",
     group(clap::ArgGroup::new("target").args(["pid", "command"])),
 )]
 struct Cli {
-    /// Icon theme name, for example media-record-symbolic
-    #[arg(long, value_name = "NAME")]
-    icon: String,
+    /// TOML file with the menu and settings; - reads stdin (see trayler init)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 
-    /// Title and tooltip of the icon
-    #[arg(long, value_name = "TEXT", default_value = "trayler")]
-    title: String,
+    /// Icon theme name, for example media-record-symbolic; required here or in the config
+    #[arg(long, value_name = "NAME")]
+    icon: Option<String>,
+
+    /// Title and tooltip of the icon [default: trayler]
+    #[arg(long, value_name = "TEXT")]
+    title: Option<String>,
 
     /// Process to follow; with neither it nor a command, trayler prints its own PID and runs until Exit
     #[arg(long)]
     pid: Option<i32>,
 
-    /// Menu entry; ICON may be empty, COMMAND runs with `sh -c`; repeatable
-    #[arg(long = "option", value_name = "ICON:LABEL:COMMAND", value_parser = parse_option)]
-    options: Vec<MenuOption>,
+    /// Text of the last menu entry [default: Exit]
+    #[arg(long, value_name = "TEXT")]
+    exit_label: Option<String>,
 
-    /// Checkbox entry; COMMAND runs with `sh -c` and gets on or off as $1; +LABEL starts checked
-    #[arg(long = "toggle", value_name = "ICON:LABEL:COMMAND", value_parser = parse_toggle)]
-    toggles: Vec<MenuOption>,
-
-    /// Text of the last menu entry
-    #[arg(long, value_name = "TEXT", default_value = "Exit")]
-    exit_label: String,
-
-    /// Signal the last menu entry sends to the followed process or command
-    #[arg(long, value_name = "SIGNAL", value_enum, default_value_t = ExitSignal::Term, requires = "target")]
-    exit_signal: ExitSignal,
+    /// Signal the last menu entry sends to the followed process or command [default: TERM]
+    #[arg(long, value_name = "SIGNAL", value_enum, requires = "target")]
+    exit_signal: Option<ExitSignal>,
 
     /// Command to run and follow; trayler exits with its exit code
     #[arg(last = true, value_name = "COMMAND")]
     command: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct MenuOption {
-    icon: String,
-    label: String,
-    command: String,
-    /// None for a plain entry, otherwise whether the toggle is checked.
-    checked: Option<bool>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum, Deserialize)]
 #[value(rename_all = "UPPER")]
+#[serde(rename_all = "UPPERCASE")]
 enum ExitSignal {
     Term,
     Int,
@@ -102,60 +88,145 @@ impl From<ExitSignal> for Signal {
     }
 }
 
-fn parse_option(s: &str) -> Result<MenuOption, String> {
-    let mut parts = s.splitn(3, ':');
-    let (Some(icon), Some(label), Some(command)) = (parts.next(), parts.next(), parts.next())
-    else {
-        return Err("expected ICON:LABEL:COMMAND".into());
-    };
-    if label.is_empty() {
-        return Err("label is empty".into());
-    }
-    if command.is_empty() {
-        return Err("command is empty".into());
-    }
-    Ok(MenuOption {
-        icon: icon.into(),
-        label: label.into(),
-        command: command.into(),
-        checked: None,
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    icon: Option<String>,
+    title: Option<String>,
+    #[serde(default)]
+    exit: ExitConfig,
+    #[serde(default, rename = "entry", deserialize_with = "entries")]
+    entries: Vec<Entry>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExitConfig {
+    label: Option<String>,
+    signal: Option<ExitSignal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum Entry {
+    Button {
+        label: String,
+        #[serde(default)]
+        icon: String,
+        command: String,
+    },
+    Toggle {
+        label: String,
+        #[serde(default)]
+        icon: String,
+        command: String,
+        #[serde(default)]
+        checked: bool,
+    },
+    Separator {},
+}
+
+// serde cannot default a missing enum tag, so each entry is read as a table first.
+fn entries<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Entry>, D::Error> {
+    use serde::de::Error;
+    Vec::<toml::Table>::deserialize(deserializer)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut table)| {
+            let kind = table
+                .entry("type")
+                .or_insert_with(|| "button".into())
+                .as_str()
+                .unwrap_or("?")
+                .to_owned();
+            let fail = |message: String| {
+                D::Error::custom(format!("entry {} ({kind}): {message}", index + 1))
+            };
+            let entry: Entry = toml::Value::Table(table)
+                .try_into()
+                .map_err(|e: toml::de::Error| fail(e.message().into()))?;
+            if let Entry::Button { label, command, .. } | Entry::Toggle { label, command, .. } =
+                &entry
+            {
+                if label.is_empty() {
+                    return Err(fail("label is empty".into()));
+                }
+                if command.is_empty() {
+                    return Err(fail("command is empty".into()));
+                }
+            }
+            Ok(entry)
+        })
+        .collect()
+}
+
+fn load_config(name: &str, text: &str) -> Result<Config, String> {
+    toml::from_str(text).map_err(|e: toml::de::Error| {
+        let at = e.span().map_or(String::new(), |span| {
+            let before = &text[..span.start];
+            let line = before.matches('\n').count() + 1;
+            let column = span.start - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+            format!(":{line}:{column}")
+        });
+        format!("{name}{at}: {}", e.message().trim())
     })
 }
 
-fn parse_toggle(s: &str) -> Result<MenuOption, String> {
-    let mut option = parse_option(s)?;
-    let checked = option.label.starts_with('+');
-    if checked {
-        option.label.remove(0);
+fn read_config(path: &Path) -> Result<Config, String> {
+    if path == Path::new("-") {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|e| format!("stdin: {e}"))?;
+        return load_config("stdin", &text);
     }
-    if option.label.is_empty() {
-        return Err("label is empty".into());
-    }
-    option.checked = Some(checked);
-    Ok(option)
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    load_config(&path.display().to_string(), &text)
 }
 
-fn parse_args<I, T>(args: I) -> Result<Cli, clap::Error>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
-    let matches = Cli::command().try_get_matches_from(args)?;
-    let mut cli = Cli::from_arg_matches(&matches)?;
-    // Options and toggles share one menu; clap's indices restore the command-line order.
-    let indices = |id| matches.indices_of(id).into_iter().flatten();
-    let mut entries: Vec<_> = indices("options")
-        .zip(std::mem::take(&mut cli.options))
-        .chain(indices("toggles").zip(std::mem::take(&mut cli.toggles)))
-        .collect();
-    entries.sort_by_key(|(index, _)| *index);
-    cli.options = entries.into_iter().map(|(_, entry)| entry).collect();
-    Ok(cli)
+struct Settings {
+    icon: String,
+    title: String,
+    entries: Vec<Entry>,
+    exit_label: String,
+    exit_signal: ExitSignal,
+}
+
+fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
+    if config.exit.signal.is_some() && cli.pid.is_none() && cli.command.is_empty() {
+        let file = match &cli.config {
+            Some(p) if p == Path::new("-") => "stdin".into(),
+            Some(p) => p.display().to_string(),
+            None => String::new(),
+        };
+        return Err(format!("{file}: exit.signal needs --pid or a command"));
+    }
+    Ok(Settings {
+        icon: cli
+            .icon
+            .clone()
+            .or(config.icon)
+            .ok_or("an icon is required: --icon or icon in the config")?,
+        title: cli
+            .title
+            .clone()
+            .or(config.title)
+            .unwrap_or_else(|| "trayler".into()),
+        entries: config.entries,
+        exit_label: cli
+            .exit_label
+            .clone()
+            .or(config.exit.label)
+            .unwrap_or_else(|| "Exit".into()),
+        exit_signal: cli
+            .exit_signal
+            .or(config.exit.signal)
+            .unwrap_or(ExitSignal::Term),
+    })
 }
 
 // clap exits 2 on usage errors; the spec wants 1 for every error.
 fn parse_cli() -> Cli {
-    parse_args(std::env::args_os()).unwrap_or_else(|e| {
+    Cli::try_parse().unwrap_or_else(|e| {
         let _ = e.print();
         std::process::exit(if e.use_stderr() { 1 } else { 0 });
     })
@@ -198,7 +269,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 struct Trayler {
     icon: String,
     title: String,
-    options: Vec<MenuOption>,
+    entries: Vec<Entry>,
     exit_label: String,
     exit_signal: Signal,
     quit: mpsc::UnboundedSender<()>,
@@ -245,36 +316,52 @@ impl ksni::Tray for Trayler {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = self
-            .options
+            .entries
             .iter()
             .enumerate()
-            .map(|(index, option)| match option.checked {
-                None => {
-                    let command = option.command.clone();
+            .map(|(index, entry)| match entry {
+                Entry::Button {
+                    label,
+                    icon,
+                    command,
+                } => {
+                    let command = command.clone();
                     StandardItem {
-                        label: menu_label(&option.label),
-                        icon_name: option.icon.clone(),
+                        label: menu_label(label),
+                        icon_name: icon.clone(),
                         activate: Box::new(move |_: &mut Self| spawn_command(&command, None)),
                         ..Default::default()
                     }
                     .into()
                 }
-                Some(checked) => CheckmarkItem {
-                    label: menu_label(&option.label),
-                    icon_name: option.icon.clone(),
+                Entry::Toggle {
+                    label,
+                    icon,
                     checked,
+                    ..
+                } => CheckmarkItem {
+                    label: menu_label(label),
+                    icon_name: icon.clone(),
+                    checked: *checked,
                     activate: Box::new(move |this: &mut Self| {
-                        let option = &mut this.options[index];
-                        let checked = !option.checked.unwrap_or_default();
-                        option.checked = Some(checked);
-                        spawn_command(&option.command, Some(if checked { "on" } else { "off" }));
+                        if let Entry::Toggle {
+                            command, checked, ..
+                        } = &mut this.entries[index]
+                        {
+                            *checked = !*checked;
+                            spawn_command(command, Some(if *checked { "on" } else { "off" }));
+                        }
                     }),
                     ..Default::default()
                 }
                 .into(),
+                Entry::Separator {} => MenuItem::Separator,
             })
             .collect();
-        if !items.is_empty() {
+        if items
+            .last()
+            .is_some_and(|item| !matches!(item, MenuItem::Separator))
+        {
             items.push(MenuItem::Separator);
         }
         items.push(
@@ -290,6 +377,11 @@ impl ksni::Tray for Trayler {
 }
 
 async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
+    let config = match &cli.config {
+        Some(path) => read_config(path)?,
+        None => Config::default(),
+    };
+    let settings = settings(&cli, config)?;
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
 
@@ -325,12 +417,12 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     let forward_to = child.as_ref().and(pidfd.clone());
 
     let (quit, mut quit_rx) = mpsc::unbounded_channel();
-    let exit_signal = cli.exit_signal.into();
+    let exit_signal = settings.exit_signal.into();
     let spawned = Trayler {
-        icon: cli.icon,
-        title: cli.title,
-        options: cli.options,
-        exit_label: cli.exit_label,
+        icon: settings.icon,
+        title: settings.title,
+        entries: settings.entries,
+        exit_label: settings.exit_label,
         exit_signal,
         quit,
         pidfd: pidfd.clone(),
@@ -426,90 +518,6 @@ async fn main() {
 mod tests {
     use super::*;
 
-    fn option(icon: &str, label: &str, command: &str) -> MenuOption {
-        MenuOption {
-            icon: icon.into(),
-            label: label.into(),
-            command: command.into(),
-            checked: None,
-        }
-    }
-
-    #[test]
-    fn toggles_start_unchecked() {
-        assert_eq!(
-            parse_toggle(":Notify:notify-ctl $1").map(|o| (o.label, o.checked)),
-            Ok(("Notify".into(), Some(false)))
-        );
-    }
-
-    #[test]
-    fn plus_starts_a_toggle_checked() {
-        assert_eq!(
-            parse_toggle(":+Automount:automount-ctl $1").map(|o| (o.label, o.checked)),
-            Ok(("Automount".into(), Some(true)))
-        );
-    }
-
-    #[test]
-    fn rejects_a_toggle_label_of_only_plus() {
-        assert!(parse_toggle(":+:cmd").is_err());
-    }
-
-    #[test]
-    fn keeps_options_and_toggles_in_command_line_order() {
-        let cli = parse(&[
-            "--icon", "x", "--toggle", ":B:b", "--option", ":A:a", "--toggle", ":C:c",
-        ])
-        .unwrap();
-        let labels: Vec<_> = cli.options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(labels, ["B", "A", "C"]);
-    }
-
-    #[test]
-    fn splits_icon_label_and_command() {
-        assert_eq!(
-            parse_option("media-playback-stop-symbolic:Stop recording:pkill -INT recorder"),
-            Ok(option(
-                "media-playback-stop-symbolic",
-                "Stop recording",
-                "pkill -INT recorder"
-            ))
-        );
-    }
-
-    #[test]
-    fn allows_an_empty_icon() {
-        assert_eq!(
-            parse_option(":Open Videos:xdg-open ~/Videos"),
-            Ok(option("", "Open Videos", "xdg-open ~/Videos"))
-        );
-    }
-
-    #[test]
-    fn keeps_colons_in_the_command() {
-        assert_eq!(
-            parse_option(":Open site:xdg-open https://example.com:8080"),
-            Ok(option("", "Open site", "xdg-open https://example.com:8080"))
-        );
-    }
-
-    #[test]
-    fn rejects_fewer_than_two_colons() {
-        assert!(parse_option("Stop recording:pkill recorder").is_err());
-        assert!(parse_option("Stop recording").is_err());
-    }
-
-    #[test]
-    fn rejects_empty_label() {
-        assert!(parse_option("icon::pkill -INT recorder").is_err());
-    }
-
-    #[test]
-    fn rejects_empty_command() {
-        assert!(parse_option("icon:Stop recording:").is_err());
-    }
-
     #[test]
     fn escapes_underscores_in_labels() {
         assert_eq!(menu_label("save_as_mp4"), "save__as__mp4");
@@ -539,20 +547,20 @@ mod tests {
     }
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        parse_args(std::iter::once("trayler").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("trayler").chain(args.iter().copied()))
     }
 
     #[test]
-    fn exit_defaults() {
+    fn exit_flags_are_unset_by_default() {
         let cli = parse(&["--icon", "x"]).unwrap();
-        assert_eq!(cli.exit_label, "Exit");
-        assert_eq!(cli.exit_signal, ExitSignal::Term);
+        assert_eq!(cli.exit_label, None);
+        assert_eq!(cli.exit_signal, None);
     }
 
     #[test]
     fn accepts_exit_signal_with_pid() {
         let cli = parse(&["--icon", "x", "--pid", "1", "--exit-signal", "INT"]).unwrap();
-        assert_eq!(cli.exit_signal, ExitSignal::Int);
+        assert_eq!(cli.exit_signal, Some(ExitSignal::Int));
     }
 
     #[test]
@@ -589,13 +597,189 @@ mod tests {
     }
 
     #[test]
-    fn icon_is_still_required_otherwise() {
-        assert!(parse(&["--title", "x"]).is_err());
-    }
-
-    #[test]
     fn maps_exit_signals() {
         assert_eq!(Signal::from(ExitSignal::Usr1), Signal::USR1);
         assert_eq!(Signal::from(ExitSignal::Kill), Signal::KILL);
+    }
+
+    fn config(text: &str) -> Result<Config, String> {
+        load_config("test.toml", text)
+    }
+
+    fn button(label: &str, icon: &str, command: &str) -> Entry {
+        Entry::Button {
+            label: label.into(),
+            icon: icon.into(),
+            command: command.into(),
+        }
+    }
+
+    #[test]
+    fn an_entry_without_type_is_a_button() {
+        let config = config("[[entry]]\nlabel = \"Hi\"\ncommand = \"echo hi\"\n").unwrap();
+        assert_eq!(config.entries, [button("Hi", "", "echo hi")]);
+    }
+
+    #[test]
+    fn reads_toggles_and_separators_in_order() {
+        let config = config(
+            "[[entry]]\ntype = \"toggle\"\nlabel = \"T\"\nchecked = true\ncommand = \"t $1\"\n\
+             [[entry]]\ntype = \"separator\"\n\
+             [[entry]]\nlabel = \"B\"\nicon = \"i\"\ncommand = \"b\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.entries,
+            [
+                Entry::Toggle {
+                    label: "T".into(),
+                    icon: String::new(),
+                    command: "t $1".into(),
+                    checked: true,
+                },
+                Entry::Separator {},
+                button("B", "i", "b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn toggles_start_unchecked() {
+        let config =
+            config("[[entry]]\ntype = \"toggle\"\nlabel = \"T\"\ncommand = \"t\"\n").unwrap();
+        assert!(matches!(
+            config.entries[0],
+            Entry::Toggle { checked: false, .. }
+        ));
+    }
+
+    #[test]
+    fn reads_top_level_and_exit_settings() {
+        let config =
+            config("icon = \"i\"\ntitle = \"T\"\n[exit]\nlabel = \"Stop\"\nsignal = \"INT\"\n")
+                .unwrap();
+        assert_eq!(config.icon.as_deref(), Some("i"));
+        assert_eq!(config.title.as_deref(), Some("T"));
+        assert_eq!(config.exit.label.as_deref(), Some("Stop"));
+        assert_eq!(config.exit.signal, Some(ExitSignal::Int));
+    }
+
+    #[test]
+    fn rejects_bad_configs() {
+        for text in [
+            "colour = \"red\"\n",
+            "[exit]\nsignal = \"SIGTERM\"\n",
+            "[[entry]]\nlabel = \"B\"\ncommand = \"b\"\nchecked = true\n",
+            "[[entry]]\ntype = \"separator\"\nlabel = \"S\"\n",
+            "[[entry]]\nlabel = \"B\"\n",
+            "[[entry]]\nlabel = \"\"\ncommand = \"b\"\n",
+            "[[entry]]\nlabel = \"B\"\ncommand = \"\"\n",
+            "[[entry]]\ntype = \"menu\"\nlabel = \"M\"\n",
+            "[[entry]]\ntype = \"label\"\nlabel = \"L\"\n",
+            "[[entry]]\ntype = \"radio\"\nlabel = \"R\"\ncommand = \"r\"\n",
+        ] {
+            assert!(config(text).is_err(), "accepted: {text}");
+        }
+    }
+
+    #[test]
+    fn config_errors_name_the_file_and_line() {
+        let error = config("icon = \"i\"\n[[entry]]\nlabel = \"B\"\n").unwrap_err();
+        assert!(error.starts_with("test.toml:2:"), "{error}");
+        assert!(!error.contains('\n'), "{error}");
+    }
+
+    #[test]
+    fn flags_override_the_config() {
+        let cli = parse(&[
+            "--icon",
+            "flag",
+            "--title",
+            "flag",
+            "--exit-label",
+            "flag",
+            "--pid",
+            "1",
+            "--exit-signal",
+            "HUP",
+        ])
+        .unwrap();
+        let file = config(
+            "icon = \"file\"\ntitle = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
+        )
+        .unwrap();
+        let settings = settings(&cli, file).unwrap();
+        assert_eq!(settings.icon, "flag");
+        assert_eq!(settings.title, "flag");
+        assert_eq!(settings.exit_label, "flag");
+        assert_eq!(settings.exit_signal, ExitSignal::Hup);
+    }
+
+    #[test]
+    fn the_config_alone_supplies_settings() {
+        let cli = parse(&["--pid", "1"]).unwrap();
+        let file = config(
+            "icon = \"file\"\ntitle = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
+        )
+        .unwrap();
+        let settings = settings(&cli, file).unwrap();
+        assert_eq!(settings.icon, "file");
+        assert_eq!(settings.title, "file");
+        assert_eq!(settings.exit_label, "file");
+        assert_eq!(settings.exit_signal, ExitSignal::Int);
+    }
+
+    #[test]
+    fn settings_defaults() {
+        let settings = settings(&parse(&["--icon", "x"]).unwrap(), Config::default()).unwrap();
+        assert_eq!(settings.title, "trayler");
+        assert_eq!(settings.exit_label, "Exit");
+        assert_eq!(settings.exit_signal, ExitSignal::Term);
+        assert!(settings.entries.is_empty());
+    }
+
+    #[test]
+    fn an_icon_is_required_somewhere() {
+        assert!(settings(&parse(&[]).unwrap(), Config::default()).is_err());
+    }
+
+    #[test]
+    fn exit_signal_in_the_config_needs_a_target() {
+        let file = config("[exit]\nsignal = \"INT\"\n").unwrap();
+        let cli = parse(&["--icon", "x", "--config", "menu.toml"]).unwrap();
+        let error = settings(&cli, file).err().unwrap();
+        assert!(error.starts_with("menu.toml: "), "{error}");
+    }
+
+    #[test]
+    fn rejects_the_removed_menu_flags() {
+        assert!(parse(&["--icon", "x", "--option", ":A:a"]).is_err());
+        assert!(parse(&["--icon", "x", "--toggle", ":A:a"]).is_err());
+    }
+
+    fn separators(entries: Vec<Entry>) -> usize {
+        let tray = Trayler {
+            icon: String::new(),
+            title: String::new(),
+            entries,
+            exit_label: "Exit".into(),
+            exit_signal: Signal::TERM,
+            quit: mpsc::unbounded_channel().0,
+            pidfd: None,
+        };
+        ksni::Tray::menu(&tray)
+            .iter()
+            .filter(|item| matches!(item, MenuItem::Separator))
+            .count()
+    }
+
+    #[test]
+    fn separates_entries_from_exit_once() {
+        assert_eq!(separators(vec![]), 0);
+        assert_eq!(separators(vec![button("B", "", "b")]), 1);
+        assert_eq!(
+            separators(vec![button("B", "", "b"), Entry::Separator {}]),
+            1
+        );
     }
 }
