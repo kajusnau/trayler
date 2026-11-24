@@ -21,6 +21,7 @@ trayler --icon media-record-symbolic --title Recording --exit-signal INT \
 | `--pid PID`                   | process to follow; **Exit** sends it the exit signal, and the icon disappears when it ends                            |
 | `-- COMMAND [ARGS]`           | run the command and follow it; **Exit** signals it, stopping trayler stops it, and trayler exits with its exit code   |
 | `--option ICON:LABEL:COMMAND` | menu entry with an optional icon (`:Label:command` for none); the command runs with `sh -c`. Repeat for more entries  |
+| `--toggle ICON:LABEL:COMMAND` | checkbox entry; the command gets `on` or `off` as `$1`. `+LABEL` starts it checked. Kept in order with `--option` |
 | `--exit-label TEXT`           | text of the last menu entry (default `Exit`)                                                                          |
 | `--exit-signal SIGNAL`        | signal the last entry sends with `--pid` or a command: `TERM` (default), `INT`, `HUP`, `QUIT`, `KILL`, `USR1`, `USR2` |
 

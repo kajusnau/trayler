@@ -3,8 +3,8 @@ use std::os::fd::OwnedFd;
 use std::process::Command;
 use std::sync::Arc;
 
-use clap::{CommandFactory, Parser};
-use ksni::menu::StandardItem;
+use clap::{CommandFactory, FromArgMatches, Parser};
+use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, TrayMethods};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use tokio::io::unix::AsyncFd;
@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 #[command(
     version,
     after_help = "\
-Clicking the icon opens a menu: the --option entries in order, then Exit
+Clicking the icon opens a menu: the --option and --toggle entries in order,
+then Exit
 (--exit-label). With --pid or a command after --, Exit sends --exit-signal
 (default TERM) to that process, and the icon disappears when it ends. A
 command is stopped together with trayler, and trayler exits with its exit
@@ -27,7 +28,9 @@ Examples:
           --option \"media-playback-stop-symbolic:Stop recording:pkill -INT recorder\" &
   trayler --icon dialog-information --option \":Say hi:notify-send hi\" &
   trayler --icon media-record-symbolic --title Recording --exit-signal INT \\
-          -- gpu-screen-recorder -w portal -o capture.mkv",
+          -- gpu-screen-recorder -w portal -o capture.mkv
+  trayler --icon drive-removable-media-symbolic \
+          --toggle ':+Automount:automount-ctl $1' &",
     group(clap::ArgGroup::new("target").args(["pid", "command"])),
 )]
 struct Cli {
@@ -47,6 +50,10 @@ struct Cli {
     #[arg(long = "option", value_name = "ICON:LABEL:COMMAND", value_parser = parse_option)]
     options: Vec<MenuOption>,
 
+    /// Checkbox entry; COMMAND runs with `sh -c` and gets on or off as $1; +LABEL starts checked
+    #[arg(long = "toggle", value_name = "ICON:LABEL:COMMAND", value_parser = parse_toggle)]
+    toggles: Vec<MenuOption>,
+
     /// Text of the last menu entry
     #[arg(long, value_name = "TEXT", default_value = "Exit")]
     exit_label: String,
@@ -65,6 +72,8 @@ struct MenuOption {
     icon: String,
     label: String,
     command: String,
+    /// None for a plain entry, otherwise whether the toggle is checked.
+    checked: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
@@ -109,12 +118,44 @@ fn parse_option(s: &str) -> Result<MenuOption, String> {
         icon: icon.into(),
         label: label.into(),
         command: command.into(),
+        checked: None,
     })
+}
+
+fn parse_toggle(s: &str) -> Result<MenuOption, String> {
+    let mut option = parse_option(s)?;
+    let checked = option.label.starts_with('+');
+    if checked {
+        option.label.remove(0);
+    }
+    if option.label.is_empty() {
+        return Err("label is empty".into());
+    }
+    option.checked = Some(checked);
+    Ok(option)
+}
+
+fn parse_args<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = Cli::command().try_get_matches_from(args)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    // Options and toggles share one menu; clap's indices restore the command-line order.
+    let indices = |id| matches.indices_of(id).into_iter().flatten();
+    let mut entries: Vec<_> = indices("options")
+        .zip(std::mem::take(&mut cli.options))
+        .chain(indices("toggles").zip(std::mem::take(&mut cli.toggles)))
+        .collect();
+    entries.sort_by_key(|(index, _)| *index);
+    cli.options = entries.into_iter().map(|(_, entry)| entry).collect();
+    Ok(cli)
 }
 
 // clap exits 2 on usage errors; the spec wants 1 for every error.
 fn parse_cli() -> Cli {
-    Cli::try_parse().unwrap_or_else(|e| {
+    parse_args(std::env::args_os()).unwrap_or_else(|e| {
         let _ = e.print();
         std::process::exit(if e.use_stderr() { 1 } else { 0 });
     })
@@ -125,8 +166,13 @@ fn menu_label(label: &str) -> String {
     label.replace('_', "__")
 }
 
-fn spawn_command(command: &str) {
-    match Command::new("sh").arg("-c").arg(command).spawn() {
+fn spawn_command(command: &str, state: Option<&str>) {
+    let mut sh = Command::new("sh");
+    sh.arg("-c").arg(command);
+    if let Some(state) = state {
+        sh.args(["sh", state]);
+    }
+    match sh.spawn() {
         // Wait on a thread so the finished child is reaped instead of left a zombie.
         Ok(mut child) => {
             std::thread::spawn(move || child.wait());
@@ -201,15 +247,31 @@ impl ksni::Tray for Trayler {
         let mut items: Vec<MenuItem<Self>> = self
             .options
             .iter()
-            .map(|option| {
-                let command = option.command.clone();
-                StandardItem {
+            .enumerate()
+            .map(|(index, option)| match option.checked {
+                None => {
+                    let command = option.command.clone();
+                    StandardItem {
+                        label: menu_label(&option.label),
+                        icon_name: option.icon.clone(),
+                        activate: Box::new(move |_: &mut Self| spawn_command(&command, None)),
+                        ..Default::default()
+                    }
+                    .into()
+                }
+                Some(checked) => CheckmarkItem {
                     label: menu_label(&option.label),
                     icon_name: option.icon.clone(),
-                    activate: Box::new(move |_: &mut Self| spawn_command(&command)),
+                    checked,
+                    activate: Box::new(move |this: &mut Self| {
+                        let option = &mut this.options[index];
+                        let checked = !option.checked.unwrap_or_default();
+                        option.checked = Some(checked);
+                        spawn_command(&option.command, Some(if checked { "on" } else { "off" }));
+                    }),
                     ..Default::default()
                 }
-                .into()
+                .into(),
             })
             .collect();
         if !items.is_empty() {
@@ -369,7 +431,39 @@ mod tests {
             icon: icon.into(),
             label: label.into(),
             command: command.into(),
+            checked: None,
         }
+    }
+
+    #[test]
+    fn toggles_start_unchecked() {
+        assert_eq!(
+            parse_toggle(":Notify:notify-ctl $1").map(|o| (o.label, o.checked)),
+            Ok(("Notify".into(), Some(false)))
+        );
+    }
+
+    #[test]
+    fn plus_starts_a_toggle_checked() {
+        assert_eq!(
+            parse_toggle(":+Automount:automount-ctl $1").map(|o| (o.label, o.checked)),
+            Ok(("Automount".into(), Some(true)))
+        );
+    }
+
+    #[test]
+    fn rejects_a_toggle_label_of_only_plus() {
+        assert!(parse_toggle(":+:cmd").is_err());
+    }
+
+    #[test]
+    fn keeps_options_and_toggles_in_command_line_order() {
+        let cli = parse(&[
+            "--icon", "x", "--toggle", ":B:b", "--option", ":A:a", "--toggle", ":C:c",
+        ])
+        .unwrap();
+        let labels: Vec<_> = cli.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["B", "A", "C"]);
     }
 
     #[test]
@@ -445,7 +539,7 @@ mod tests {
     }
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("trayler").chain(args.iter().copied()))
+        parse_args(std::iter::once("trayler").chain(args.iter().copied()))
     }
 
     #[test]
