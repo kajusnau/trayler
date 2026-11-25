@@ -7,6 +7,9 @@ icon = "media-record-symbolic"
 # Title and tooltip of the icon. Default: "trayler".
 title = "trayler"
 
+# Path of a Unix socket to change the tray at runtime with `trayler ctl`.
+# control = "/run/user/1000/trayler.sock"
+
 # The last menu entry. With --pid or a command after --, it sends `signal` to
 # that process; otherwise it closes trayler.
 [exit]

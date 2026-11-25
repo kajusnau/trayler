@@ -1,4 +1,10 @@
-#![cfg_attr(not(test), allow(dead_code))]
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::path::Path;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{parse_entry, validate_entries, Entry};
 use crate::tray::Trayler;
@@ -179,6 +185,84 @@ pub(crate) fn apply(tray: &mut Trayler, command: Command) -> Result<(), String> 
     Ok(())
 }
 
+pub(crate) struct Request {
+    pub(crate) command: Command,
+    pub(crate) reply: oneshot::Sender<String>,
+}
+
+pub(crate) fn bind(path: &Path) -> Result<UnixListener, String> {
+    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            return Err(format!("{}: exists and is not a socket", path.display()));
+        }
+        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            return Err(format!("{}: already in use", path.display()));
+        }
+        std::fs::remove_file(path).map_err(fail)?;
+    }
+    let listener = UnixListener::bind(path).map_err(fail)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(fail)?;
+    Ok(listener)
+}
+
+pub(crate) async fn serve(listener: UnixListener, requests: mpsc::UnboundedSender<Request>) {
+    let uid = rustix::process::getuid().as_raw();
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
+        // The 0600 mode is set after bind, so check the peer too.
+        if !matches!(stream.peer_cred(), Ok(c) if c.uid() == uid) {
+            continue;
+        }
+        tokio::spawn(connection(stream, requests.clone()));
+    }
+}
+
+async fn connection(stream: UnixStream, requests: mpsc::UnboundedSender<Request>) {
+    let (read, mut write) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let reply = match parse(&line) {
+            Err(e) => format!("error: {e}"),
+            Ok(command) => {
+                let (reply, answer) = oneshot::channel();
+                if requests.send(Request { command, reply }).is_err() {
+                    return;
+                }
+                answer
+                    .await
+                    .unwrap_or_else(|_| "error: trayler is exiting".into())
+            }
+        };
+        if write
+            .write_all(format!("{reply}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+pub(crate) fn ctl(path: &Path, words: &[String]) -> Result<(), String> {
+    if words.iter().any(|w| w.contains(['\n', '\r'])) {
+        return Err("commands cannot contain line breaks".into());
+    }
+    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut stream = std::os::unix::net::UnixStream::connect(path).map_err(fail)?;
+    let line: Vec<String> = words.iter().map(|w| quote(w)).collect();
+    writeln!(stream, "{}", line.join(" ")).map_err(fail)?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).map_err(fail)?;
+    match reply.trim_end().strip_prefix("error: ") {
+        None if reply.trim_end() == "ok" => Ok(()),
+        None => Err(format!("unexpected reply: {}", reply.trim_end())),
+        Some(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rustix::process::Signal;
@@ -356,5 +440,66 @@ mod tests {
         run(&mut tray, "set t checked=true").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!marker.exists());
+    }
+
+    fn socket(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("trayler-ctl-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("control")
+    }
+
+    async fn serve_stub(path: &std::path::Path) {
+        let listener = bind(path).unwrap();
+        let (requests, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(serve(listener, requests));
+        tokio::spawn(async move {
+            let mut tray = tray(vec![button("a")]);
+            while let Some(Request { command, reply }) = rx.recv().await {
+                let _ = reply.send(match apply(&mut tray, command) {
+                    Ok(()) => "ok".into(),
+                    Err(e) => format!("error: {e}"),
+                });
+            }
+        });
+    }
+
+    async fn ctl_async(path: &std::path::Path, words: &[&str]) -> Result<(), String> {
+        let (path, words) = (
+            path.to_owned(),
+            words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        );
+        tokio::task::spawn_blocking(move || ctl(&path, &words))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ctl_talks_to_the_socket() {
+        let path = socket("talks");
+        serve_stub(&path).await;
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        ctl_async(&path, &["set", "a", "label=x y"]).await.unwrap();
+        let error = ctl_async(&path, &["remove", "nope"]).await.unwrap_err();
+        assert_eq!(error, "no entry \"nope\"");
+        assert!(ctl_async(&path, &["bogus"]).await.is_err());
+        let error = ctl_async(&path, &["title", "a\nb"]).await.unwrap_err();
+        assert_eq!(error, "commands cannot contain line breaks");
+    }
+
+    #[tokio::test]
+    async fn bind_replaces_a_stale_socket_only() {
+        let path = socket("stale");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        serve_stub(&path).await;
+        assert!(bind(&path).unwrap_err().contains("already in use"));
+        let file = socket("file");
+        std::fs::write(&file, "keep").unwrap();
+        assert!(bind(&file).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
     }
 }

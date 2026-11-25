@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,7 @@ pub(crate) fn init(path: &Path) -> Result<(), String> {
 pub(crate) struct Config {
     icon: Option<String>,
     title: Option<String>,
+    control: Option<PathBuf>,
     #[serde(default)]
     exit: ExitConfig,
     #[serde(default, rename = "entry", deserialize_with = "entries")]
@@ -186,6 +187,7 @@ pub(crate) struct Settings {
     pub(crate) exit_label: String,
     pub(crate) exit_signal: ExitSignal,
     pub(crate) exit_id: String,
+    pub(crate) control: Option<PathBuf>,
 }
 
 pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
@@ -221,6 +223,7 @@ pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
             .or(config.exit.signal)
             .unwrap_or(ExitSignal::Term),
         exit_id,
+        control: cli.control.clone().or(config.control),
     })
 }
 
@@ -441,10 +444,12 @@ mod tests {
             "1",
             "--exit-signal",
             "HUP",
+            "--control",
+            "flag",
         ])
         .unwrap();
         let file = config(
-            "icon = \"file\"\ntitle = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
+            "icon = \"file\"\ntitle = \"file\"\ncontrol = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
         )
         .unwrap();
         let settings = settings(&cli, file).unwrap();
@@ -452,13 +457,14 @@ mod tests {
         assert_eq!(settings.title, "flag");
         assert_eq!(settings.exit_label, "flag");
         assert_eq!(settings.exit_signal, ExitSignal::Hup);
+        assert_eq!(settings.control.as_deref(), Some(Path::new("flag")));
     }
 
     #[test]
     fn the_config_alone_supplies_settings() {
         let cli = parse(&["--pid", "1"]).unwrap();
         let file = config(
-            "icon = \"file\"\ntitle = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
+            "icon = \"file\"\ntitle = \"file\"\ncontrol = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
         )
         .unwrap();
         let settings = settings(&cli, file).unwrap();
@@ -466,6 +472,7 @@ mod tests {
         assert_eq!(settings.title, "file");
         assert_eq!(settings.exit_label, "file");
         assert_eq!(settings.exit_signal, ExitSignal::Int);
+        assert_eq!(settings.control.as_deref(), Some(Path::new("file")));
     }
 
     #[test]

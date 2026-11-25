@@ -50,6 +50,10 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "SIGNAL", value_enum, requires = "target")]
     pub(crate) exit_signal: Option<ExitSignal>,
 
+    /// Listen on this Unix socket for commands that change the tray (see trayler ctl)
+    #[arg(long, value_name = "PATH")]
+    pub(crate) control: Option<PathBuf>,
+
     /// Command to run and follow; trayler exits with its exit code
     #[arg(last = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -64,6 +68,18 @@ pub(crate) enum Action {
     Init {
         #[arg(value_name = "PATH", default_value = "trayler.toml")]
         path: PathBuf,
+    },
+    /// Send a command to a trayler started with --control
+    Ctl {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        #[arg(
+            value_name = "COMMAND",
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        command: Vec<String>,
     },
 }
 
@@ -171,5 +187,14 @@ mod tests {
     fn rejects_the_removed_menu_flags() {
         assert!(parse(&["--icon", "x", "--option", ":A:a"]).is_err());
         assert!(parse(&["--icon", "x", "--toggle", ":A:a"]).is_err());
+    }
+
+    #[test]
+    fn parses_ctl() {
+        let cli = parse(&["ctl", "/run/t.sock", "set", "a", "label=x y"]).unwrap();
+        assert!(
+            matches!(cli.action, Some(Action::Ctl { ref command, .. }) if command == &["set", "a", "label=x y"])
+        );
+        assert!(parse(&["ctl", "/run/t.sock"]).is_err());
     }
 }

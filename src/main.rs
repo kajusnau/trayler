@@ -19,12 +19,30 @@ use config::{init, read_config, settings, Config};
 use process::{exit_code, open_pidfd};
 use tray::Trayler;
 
+struct RemoveOnDrop(Option<std::path::PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     let config = match &cli.config {
         Some(path) => read_config(path)?,
         None => Config::default(),
     };
     let settings = settings(&cli, config)?;
+    let (requests, mut requests_rx) = mpsc::unbounded_channel();
+    if let Some(path) = &settings.control {
+        let listener = control::bind(path)?;
+        tokio::spawn(control::serve(listener, requests));
+        // Inherited by the followed command and every menu command; nothing else runs yet.
+        std::env::set_var("TRAYLER_CONTROL", path);
+    }
+    let _socket = RemoveOnDrop(settings.control.clone());
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
 
@@ -124,6 +142,14 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                 ended_by = Some(id);
                 if !following { break 0 }
             }
+            Some(control::Request { command, reply }) = requests_rx.recv() => {
+                let answer = match handle.update(|tray| control::apply(tray, command)).await {
+                    Some(Ok(())) => "ok".into(),
+                    Some(Err(e)) => format!("error: {e}"),
+                    None => "error: trayler is exiting".into(),
+                };
+                let _ = reply.send(answer);
+            }
             _ = term.recv() => {
                 ended_by = None;
                 if !forward(Signal::TERM) { break 0 }
@@ -169,6 +195,13 @@ async fn main() {
         Err(_) => {}
     }
     let cli = Cli::parse();
+    if let Some(Action::Ctl { path, command }) = &cli.action {
+        if let Err(e) = control::ctl(path, command) {
+            eprintln!("trayler: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(Action::Init { path }) = &cli.action {
         if let Err(e) = init(path) {
             eprintln!("trayler: {e}");

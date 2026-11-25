@@ -21,6 +21,7 @@ trayler --config recording.toml --exit-signal INT \
 | `--title TEXT`                | name and tooltip of the icon (default `trayler`)                                                                      |
 | `--pid PID`                   | process to follow; **Exit** sends it the exit signal, and the icon disappears when it ends                            |
 | `-- COMMAND [ARGS]`           | run the command and follow it; **Exit** signals it, stopping trayler stops it, and trayler exits with its exit code   |
+| `--control PATH`              | Unix socket on which trayler accepts commands; see [Runtime control](#runtime-control)                                |
 | `--exit-label TEXT`           | text of the last menu entry (default `Exit`)                                                                          |
 | `--exit-signal SIGNAL`        | signal the last entry sends with `--pid` or a command: `TERM` (default), `INT`, `HUP`, `QUIT`, `KILL`, `USR1`, `USR2` |
 
@@ -64,10 +65,35 @@ The menu lists the entries top to bottom as they are written in the config, then
 | `label`              | `id`, `label`, `icon` | a line of text that cannot be clicked |
 | `separator`          | none                                    | a separator line                                                  |
 
-`[exit]` takes `label`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
+`control` (the same as `--control`) can also be set at the top level of the config. `[exit]` takes `label`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
 `--config -` the config is read from stdin, so a command started after `--` gets an empty stdin.
 
 When the session ends through a menu entry, trayler prints that entry's `id` on stdout (after its own PID when it printed one). Nothing is printed when the followed process ends by itself or trayler is stopped by a signal. Exit codes are unchanged.
+
+## Runtime control
+
+With `--control PATH` (or `control` in the config), trayler listens on a Unix socket that only your user can use, and removes it on exit. It refuses a path that is a file or a socket another trayler is using. Send a command with `trayler ctl PATH COMMAND...`; it prints nothing on success and exits 1 with the error on stderr otherwise. The followed command and every menu command get the path in `TRAYLER_CONTROL`.
+
+| Command                          | Effect                                                                                       |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `icon NAME`                      | change the icon                                                                              |
+| `title TEXT`                     | change the title and tooltip                                                                 |
+| `set ID KEY=VALUE...`            | change `label`, `icon`, `checked`, `label_checked`, `icon_checked` or `command` of an entry; for the exit entry only `label` |
+| `add KEY=VALUE... [after=ID\|before=ID]` | add an entry, just above Exit unless `after` or `before` is given; it needs an `id`             |
+| `remove ID`                      | remove an entry; the exit entry cannot be removed                                            |
+
+`set` only changes the entry; it never runs its command. Values are plain words separated by spaces. Wrap a word in double quotes to include spaces, and escape `"` and `\` inside as `\"` and `\\`. Words cannot contain line breaks. Each command gets one reply line on the socket: `ok` or `error: MESSAGE`.
+
+```sh
+trayler --config recording.toml --control "$XDG_RUNTIME_DIR/rec.sock" --pid "$pid" &
+trayler ctl "$XDG_RUNTIME_DIR/rec.sock" set status "label=Paused"
+```
+
+A menu command can update its own entry:
+
+```toml
+command = 'gsr pause $1 && trayler ctl "$TRAYLER_CONTROL" icon media-playback-pause-symbolic'
+```
 
 ## Building
 
