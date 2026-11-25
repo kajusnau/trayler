@@ -170,6 +170,7 @@ pub(crate) struct Settings {
     pub(crate) entries: Vec<Entry>,
     pub(crate) exit_label: String,
     pub(crate) exit_signal: ExitSignal,
+    pub(crate) exit_id: String,
 }
 
 pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
@@ -204,6 +205,7 @@ pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
             .exit_signal
             .or(config.exit.signal)
             .unwrap_or(ExitSignal::Term),
+        exit_id,
     })
 }
 
@@ -304,10 +306,15 @@ mod tests {
         ] {
             assert!(settings_of(text).is_err(), "accepted: {text}");
         }
-        assert!(settings_of(
-            "[exit]\nid = \"stop\"\n[[entry]]\nid = \"exit\"\nlabel = \"A\"\nexit = true\n",
-        )
-        .is_ok());
+        assert_eq!(
+            settings_of(
+                "[exit]\nid = \"stop\"\n[[entry]]\nid = \"exit\"\nlabel = \"A\"\nexit = true\n",
+            )
+            .unwrap()
+            .exit_id,
+            "stop"
+        );
+        assert_eq!(settings_of("").unwrap().exit_id, "exit");
     }
 
     #[test]

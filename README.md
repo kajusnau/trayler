@@ -59,12 +59,14 @@ The menu lists the entries top to bottom as they are written in the config, then
 
 | Type                 | Keys                                    | Behaviour                                                         |
 | -------------------- | --------------------------------------- | ----------------------------------------------------------------- |
-| `button` (default)   | `label`, `icon`, `command`              | runs the command with `sh -c`                                     |
-| `toggle`             | `label`, `icon`, `command`, `checked`   | checkbox; the command gets `on` or `off` as `$1`                  |
+| `button` (default)   | `id`, `label`, `icon`, `command`, `exit` | runs the command with `sh -c`; `exit = true` ends the session like **Exit**, needs an `id`, and makes `command` optional |
+| `toggle`             | `id`, `label`, `icon`, `command`, `checked` | checkbox; the command gets `on` or `off` as `$1`              |
 | `separator`          | none                                    | a separator line                                                  |
 
-`[exit]` takes `label` and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
+`[exit]` takes `label`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
 `--config -` the config is read from stdin, so a command started after `--` gets an empty stdin.
+
+When the session ends through a menu entry, trayler prints that entry's `id` on stdout (after its own PID when it printed one). Nothing is printed when the followed process ends by itself or trayler is stopped by a signal. Exit codes are unchanged.
 
 ## Building
 

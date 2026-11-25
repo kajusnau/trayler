@@ -34,22 +34,19 @@ pub(crate) struct Trayler {
     pub(crate) title: String,
     pub(crate) entries: Vec<Entry>,
     pub(crate) exit_label: String,
+    pub(crate) exit_id: String,
     pub(crate) exit_signal: Signal,
-    pub(crate) quit: mpsc::UnboundedSender<()>,
+    pub(crate) quit: mpsc::UnboundedSender<String>,
     pub(crate) pidfd: Option<Arc<OwnedFd>>,
 }
 
 impl Trayler {
-    fn exit(&self) {
-        match &self.pidfd {
-            // trayler exits once the pidfd reports the process gone.
-            Some(pidfd) => {
-                if let Err(e) = pidfd_send_signal(pidfd, self.exit_signal) {
-                    eprintln!("trayler: {e}");
-                }
-            }
-            None => {
-                let _ = self.quit.send(());
+    // Queue the id before signalling, so it is there by the time main sees the process exit.
+    fn exit(&self, id: &str) {
+        let _ = self.quit.send(id.to_owned());
+        if let Some(pidfd) = &self.pidfd {
+            if let Err(e) = pidfd_send_signal(pidfd, self.exit_signal) {
+                eprintln!("trayler: {e}");
             }
         }
     }
@@ -84,16 +81,25 @@ impl ksni::Tray for Trayler {
             .enumerate()
             .map(|(index, entry)| match entry {
                 Entry::Button {
+                    id,
                     label,
                     icon,
                     command,
-                    ..
+                    exit,
                 } => {
-                    let command = command.clone();
+                    let (id, command, exit) = (id.clone(), command.clone(), *exit);
                     StandardItem {
                         label: menu_label(label),
                         icon_name: icon.clone(),
-                        activate: Box::new(move |_: &mut Self| spawn_command(&command, None)),
+                        activate: Box::new(move |this: &mut Self| {
+                            if !command.is_empty() {
+                                spawn_command(&command, None);
+                            }
+                            if exit {
+                                // validate_entries guarantees exit buttons have an id.
+                                this.exit(id.as_deref().unwrap_or_default());
+                            }
+                        }),
                         ..Default::default()
                     }
                     .into()
@@ -131,7 +137,7 @@ impl ksni::Tray for Trayler {
         items.push(
             StandardItem {
                 label: menu_label(&self.exit_label),
-                activate: Box::new(|this: &mut Self| this.exit()),
+                activate: Box::new(|this: &mut Self| this.exit(&this.exit_id.clone())),
                 ..Default::default()
             }
             .into(),
@@ -160,16 +166,34 @@ mod tests {
         }
     }
 
-    fn separators(entries: Vec<Entry>) -> usize {
+    fn tray(
+        entries: Vec<Entry>,
+        pidfd: Option<Arc<OwnedFd>>,
+    ) -> (Trayler, mpsc::UnboundedReceiver<String>) {
+        let (quit, quit_rx) = mpsc::unbounded_channel();
         let tray = Trayler {
             icon: String::new(),
             title: String::new(),
             entries,
             exit_label: "Exit".into(),
+            exit_id: "exit".into(),
             exit_signal: Signal::TERM,
-            quit: mpsc::unbounded_channel().0,
-            pidfd: None,
+            quit,
+            pidfd,
         };
+        (tray, quit_rx)
+    }
+
+    fn activate(tray: &mut Trayler, index: usize) {
+        match ksni::Tray::menu(tray).swap_remove(index) {
+            MenuItem::Standard(item) => (item.activate)(tray),
+            MenuItem::Checkmark(item) => (item.activate)(tray),
+            _ => panic!("item {index} cannot be activated"),
+        }
+    }
+
+    fn separators(entries: Vec<Entry>) -> usize {
+        let (tray, _) = tray(entries, None);
         ksni::Tray::menu(&tray)
             .iter()
             .filter(|item| matches!(item, MenuItem::Separator))
@@ -184,5 +208,35 @@ mod tests {
             separators(vec![button("B", "", "b"), Entry::Separator {}]),
             1
         );
+    }
+
+    #[test]
+    fn exit_entries_report_their_id() {
+        let discard = Entry::Button {
+            id: Some("discard".into()),
+            label: "Discard".into(),
+            icon: String::new(),
+            command: String::new(),
+            exit: true,
+        };
+        let (mut tray, mut quit_rx) = tray(vec![discard], None);
+        activate(&mut tray, 0);
+        assert_eq!(quit_rx.try_recv().unwrap(), "discard");
+        activate(&mut tray, 2);
+        assert_eq!(quit_rx.try_recv().unwrap(), "exit");
+    }
+
+    #[test]
+    fn exit_entries_signal_the_followed_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pidfd = Arc::new(crate::process::open_pidfd(child.id() as i32).unwrap());
+        let (mut tray, mut quit_rx) = tray(vec![], Some(pidfd));
+        activate(&mut tray, 0);
+        assert_eq!(quit_rx.try_recv().unwrap(), "exit");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(child.wait().unwrap().signal(), Some(15));
     }
 }

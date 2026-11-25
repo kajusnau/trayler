@@ -55,6 +55,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         std::io::stdout().flush()?;
         None
     };
+    let following = pidfd.is_some();
     // Only a command trayler started is stopped together with trayler.
     let forward_to = child.as_ref().and(pidfd.clone());
 
@@ -65,6 +66,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         title: settings.title,
         entries: settings.entries,
         exit_label: settings.exit_label,
+        exit_id: settings.exit_id,
         exit_signal,
         quit,
         pidfd: pidfd.clone(),
@@ -107,16 +109,35 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         None => false,
     };
 
+    let mut ended_by = None;
     let code = loop {
         tokio::select! {
-            result = &mut followed => break result?,
-            _ = quit_rx.recv() => break 0,
-            _ = term.recv() => if !forward(Signal::TERM) { break 0 },
-            _ = int.recv() => if !forward(Signal::INT) { break 0 },
+            result = &mut followed => {
+                // select! picks a ready branch at random, so an id may still be queued.
+                while let Ok(id) = quit_rx.try_recv() {
+                    ended_by = Some(id);
+                }
+                break result?;
+            }
+            Some(id) = quit_rx.recv() => {
+                ended_by = Some(id);
+                if !following { break 0 }
+            }
+            _ = term.recv() => {
+                ended_by = None;
+                if !forward(Signal::TERM) { break 0 }
+            }
+            _ = int.recv() => {
+                ended_by = None;
+                if !forward(Signal::INT) { break 0 }
+            }
         }
     };
 
     handle.shutdown().await;
+    if let Some(id) = ended_by {
+        println!("{id}");
+    }
     Ok(code)
 }
 
