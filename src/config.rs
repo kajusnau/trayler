@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::{Cli, ExitSignal};
 
@@ -39,11 +39,11 @@ struct ExitConfig {
     signal: Option<ExitSignal>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Entry {
     Button {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         label: String,
         #[serde(default)]
@@ -54,21 +54,21 @@ pub(crate) enum Entry {
         exit: bool,
     },
     Toggle {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         label: String,
         #[serde(default)]
         icon: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         label_checked: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         icon_checked: Option<String>,
         command: String,
         #[serde(default)]
         checked: bool,
     },
     Label {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         label: String,
         #[serde(default)]
