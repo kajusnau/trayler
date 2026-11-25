@@ -30,10 +30,13 @@ command = "xdg-open ~/Videos"
 type = "separator"
 
 # A toggle is a checkbox. Each click runs `command` with "on" or "off" as $1.
-# `checked` (default false) is the starting state.
+# `checked` (default false) is the starting state. `label_checked` and
+# `icon_checked` replace `label` and `icon` while it is checked.
 [[entry]]
 type = "toggle"
 label = "Do not disturb"
+label_checked = "Do not disturb (on)"
+icon_checked = "notifications-disabled-symbolic"
 checked = false
 command = "notify-send \"Do not disturb: $1\""
 

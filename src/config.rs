@@ -59,6 +59,10 @@ pub(crate) enum Entry {
         label: String,
         #[serde(default)]
         icon: String,
+        #[serde(default)]
+        label_checked: Option<String>,
+        #[serde(default)]
+        icon_checked: Option<String>,
         command: String,
         #[serde(default)]
         checked: bool,
@@ -230,7 +234,12 @@ mod tests {
         assert!(matches!(config.entries[1], Entry::Separator {}));
         assert!(matches!(
             config.entries[2],
-            Entry::Toggle { checked: false, .. }
+            Entry::Toggle {
+                checked: false,
+                label_checked: Some(_),
+                icon_checked: Some(_),
+                ..
+            }
         ));
         assert!(matches!(
             config.entries[3],
@@ -332,6 +341,8 @@ mod tests {
                     id: None,
                     label: "T".into(),
                     icon: String::new(),
+                    label_checked: None,
+                    icon_checked: None,
                     command: "t $1".into(),
                     checked: true,
                 },
@@ -368,6 +379,7 @@ mod tests {
             "colour = \"red\"\n",
             "[exit]\nsignal = \"SIGTERM\"\n",
             "[[entry]]\nlabel = \"B\"\ncommand = \"b\"\nchecked = true\n",
+            "[[entry]]\nlabel = \"B\"\ncommand = \"b\"\nlabel_checked = \"C\"\n",
             "[[entry]]\ntype = \"separator\"\nlabel = \"S\"\n",
             "[[entry]]\nlabel = \"B\"\n",
             "[[entry]]\nlabel = \"\"\ncommand = \"b\"\n",

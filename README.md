@@ -60,7 +60,7 @@ The menu lists the entries top to bottom as they are written in the config, then
 | Type                 | Keys                                    | Behaviour                                                         |
 | -------------------- | --------------------------------------- | ----------------------------------------------------------------- |
 | `button` (default)   | `id`, `label`, `icon`, `command`, `exit` | runs the command with `sh -c`; `exit = true` ends the session like **Exit**, needs an `id`, and makes `command` optional |
-| `toggle`             | `id`, `label`, `icon`, `command`, `checked` | checkbox; the command gets `on` or `off` as `$1`              |
+| `toggle`             | `id`, `label`, `icon`, `label_checked`, `icon_checked`, `command`, `checked` | checkbox; the command gets `on` or `off` as `$1`; `label_checked`/`icon_checked` are shown while checked |
 | `separator`          | none                                    | a separator line                                                  |
 
 `[exit]` takes `label`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With

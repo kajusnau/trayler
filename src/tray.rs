@@ -107,24 +107,35 @@ impl ksni::Tray for Trayler {
                 Entry::Toggle {
                     label,
                     icon,
+                    label_checked,
+                    icon_checked,
                     checked,
                     ..
-                } => CheckmarkItem {
-                    label: menu_label(label),
-                    icon_name: icon.clone(),
-                    checked: *checked,
-                    activate: Box::new(move |this: &mut Self| {
-                        if let Entry::Toggle {
-                            command, checked, ..
-                        } = &mut this.entries[index]
-                        {
-                            *checked = !*checked;
-                            spawn_command(command, Some(if *checked { "on" } else { "off" }));
-                        }
-                    }),
-                    ..Default::default()
+                } => {
+                    let (label, icon) = match checked {
+                        true => (
+                            label_checked.as_ref().unwrap_or(label),
+                            icon_checked.as_ref().unwrap_or(icon),
+                        ),
+                        false => (label, icon),
+                    };
+                    CheckmarkItem {
+                        label: menu_label(label),
+                        icon_name: icon.clone(),
+                        checked: *checked,
+                        activate: Box::new(move |this: &mut Self| {
+                            if let Entry::Toggle {
+                                command, checked, ..
+                            } = &mut this.entries[index]
+                            {
+                                *checked = !*checked;
+                                spawn_command(command, Some(if *checked { "on" } else { "off" }));
+                            }
+                        }),
+                        ..Default::default()
+                    }
+                    .into()
                 }
-                .into(),
                 Entry::Separator {} => MenuItem::Separator,
             })
             .collect();
@@ -190,6 +201,33 @@ mod tests {
             MenuItem::Checkmark(item) => (item.activate)(tray),
             _ => panic!("item {index} cannot be activated"),
         }
+    }
+
+    fn pause(checked: bool) -> Entry {
+        Entry::Toggle {
+            id: None,
+            label: "Pause".into(),
+            icon: "pause".into(),
+            label_checked: Some("Resume".into()),
+            icon_checked: None,
+            command: "true".into(),
+            checked,
+        }
+    }
+
+    fn shown(tray: &Trayler) -> (String, String) {
+        match ksni::Tray::menu(tray).swap_remove(0) {
+            MenuItem::Checkmark(item) => (item.label, item.icon_name),
+            _ => panic!("not a toggle"),
+        }
+    }
+
+    #[test]
+    fn toggles_show_their_checked_label() {
+        let (mut tray, _) = tray(vec![pause(false)], None);
+        assert_eq!(shown(&tray), ("Pause".into(), "pause".into()));
+        activate(&mut tray, 0);
+        assert_eq!(shown(&tray), ("Resume".into(), "pause".into()));
     }
 
     fn separators(entries: Vec<Entry>) -> usize {
