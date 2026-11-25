@@ -136,6 +136,13 @@ impl ksni::Tray for Trayler {
                     }
                     .into()
                 }
+                Entry::Label { label, icon, .. } => StandardItem {
+                    label: menu_label(label),
+                    icon_name: icon.clone(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
                 Entry::Separator {} => MenuItem::Separator,
             })
             .collect();
@@ -236,6 +243,20 @@ mod tests {
             .iter()
             .filter(|item| matches!(item, MenuItem::Separator))
             .count()
+    }
+
+    #[test]
+    fn labels_cannot_be_clicked() {
+        let label = Entry::Label {
+            id: None,
+            label: "Status".into(),
+            icon: String::new(),
+        };
+        let (tray, _) = tray(vec![label], None);
+        match ksni::Tray::menu(&tray).swap_remove(0) {
+            MenuItem::Standard(item) => assert!(!item.enabled),
+            _ => panic!("not a standard item"),
+        }
     }
 
     #[test]

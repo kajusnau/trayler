@@ -67,13 +67,22 @@ pub(crate) enum Entry {
         #[serde(default)]
         checked: bool,
     },
+    Label {
+        #[serde(default)]
+        id: Option<String>,
+        label: String,
+        #[serde(default)]
+        icon: String,
+    },
     Separator {},
 }
 
 impl Entry {
     pub(crate) fn id(&self) -> Option<&str> {
         match self {
-            Entry::Button { id, .. } | Entry::Toggle { id, .. } => id.as_deref(),
+            Entry::Button { id, .. } | Entry::Toggle { id, .. } | Entry::Label { id, .. } => {
+                id.as_deref()
+            }
             Entry::Separator {} => None,
         }
     }
@@ -104,7 +113,9 @@ pub(crate) fn parse_entry(mut table: toml::Table) -> Result<Entry, String> {
         .try_into()
         .map_err(|e: toml::de::Error| e.message().to_owned())?;
     match &entry {
-        Entry::Button { label, .. } | Entry::Toggle { label, .. } if label.is_empty() => {
+        Entry::Button { label, .. } | Entry::Toggle { label, .. } | Entry::Label { label, .. }
+            if label.is_empty() =>
+        {
             Err("label is empty".into())
         }
         Entry::Button {
@@ -230,10 +241,11 @@ mod tests {
     #[test]
     fn the_example_is_a_valid_config() {
         let config = load_config("example.toml", EXAMPLE).unwrap();
-        assert_eq!(config.entries.len(), 4);
+        assert_eq!(config.entries.len(), 5);
         assert!(matches!(config.entries[1], Entry::Separator {}));
+        assert!(matches!(config.entries[2], Entry::Label { .. }));
         assert!(matches!(
-            config.entries[2],
+            config.entries[3],
             Entry::Toggle {
                 checked: false,
                 label_checked: Some(_),
@@ -242,7 +254,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            config.entries[3],
+            config.entries[4],
             Entry::Button { exit: true, .. }
         ));
         assert!(settings(&parse(&[]).unwrap(), config).is_ok());
@@ -327,6 +339,20 @@ mod tests {
     }
 
     #[test]
+    fn reads_labels() {
+        let config =
+            config("[[entry]]\ntype = \"label\"\nid = \"s\"\nlabel = \"Recording\"\n").unwrap();
+        assert_eq!(
+            config.entries,
+            [Entry::Label {
+                id: Some("s".into()),
+                label: "Recording".into(),
+                icon: String::new()
+            }]
+        );
+    }
+
+    #[test]
     fn reads_toggles_and_separators_in_order() {
         let config = config(
             "[[entry]]\ntype = \"toggle\"\nlabel = \"T\"\nchecked = true\ncommand = \"t $1\"\n\
@@ -385,7 +411,8 @@ mod tests {
             "[[entry]]\nlabel = \"\"\ncommand = \"b\"\n",
             "[[entry]]\nlabel = \"B\"\ncommand = \"\"\n",
             "[[entry]]\ntype = \"menu\"\nlabel = \"M\"\n",
-            "[[entry]]\ntype = \"label\"\nlabel = \"L\"\n",
+            "[[entry]]\ntype = \"label\"\nlabel = \"L\"\ncommand = \"l\"\n",
+            "[[entry]]\ntype = \"label\"\nlabel = \"\"\n",
             "[[entry]]\ntype = \"radio\"\nlabel = \"R\"\ncommand = \"r\"\n",
             "[[entry]]\ntype = \"toggle\"\nid = \"t\"\nlabel = \"T\"\ncommand = \"t\"\nexit = true\n",
             "[[entry]]\ntype = \"separator\"\nid = \"s\"\n",

@@ -17,7 +17,7 @@ label = "Exit"
 # signal = "INT"
 
 # Menu entries, listed top to bottom as they are written here.
-# `type` is "button" (the default), "toggle" or "separator".
+# `type` is "button" (the default), "toggle", "label" or "separator".
 
 # A button runs `command` with `sh -c`. `icon` is optional. `id` names an entry
 # for the output of trayler and for `exit = true`.
@@ -28,6 +28,11 @@ command = "xdg-open ~/Videos"
 
 [[entry]]
 type = "separator"
+
+# A label is a line of text that cannot be clicked.
+[[entry]]
+type = "label"
+label = "Recording"
 
 # A toggle is a checkbox. Each click runs `command` with "on" or "off" as $1.
 # `checked` (default false) is the starting state. `label_checked` and
