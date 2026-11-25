@@ -11,13 +11,16 @@ title = "trayler"
 # that process; otherwise it closes trayler.
 [exit]
 label = "Exit"
+# Printed to stdout when this entry ends the session.
+# id = "exit"
 # TERM (default), INT, HUP, QUIT, KILL, USR1 or USR2. Only with --pid or a command.
 # signal = "INT"
 
 # Menu entries, listed top to bottom as they are written here.
 # `type` is "button" (the default), "toggle" or "separator".
 
-# A button runs `command` with `sh -c`. `icon` is optional.
+# A button runs `command` with `sh -c`. `icon` is optional. `id` names an entry
+# for the output of trayler and for `exit = true`.
 [[entry]]
 label = "Open Videos"
 icon = "folder-videos-symbolic"
@@ -33,3 +36,11 @@ type = "toggle"
 label = "Do not disturb"
 checked = false
 command = "notify-send \"Do not disturb: $1\""
+
+# With `exit = true` a button runs its command, then ends the session like Exit
+# does. It needs an `id`, which is printed to stdout.
+[[entry]]
+id = "discard"
+label = "Discard"
+exit = true
+command = "notify-send Discarded"

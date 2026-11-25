@@ -87,6 +87,7 @@ impl ksni::Tray for Trayler {
                     label,
                     icon,
                     command,
+                    ..
                 } => {
                     let command = command.clone();
                     StandardItem {
@@ -151,9 +152,11 @@ mod tests {
 
     fn button(label: &str, icon: &str, command: &str) -> Entry {
         Entry::Button {
+            id: None,
             label: label.into(),
             icon: icon.into(),
             command: command.into(),
+            exit: false,
         }
     }
 

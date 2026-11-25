@@ -34,6 +34,7 @@ pub(crate) struct Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExitConfig {
+    id: Option<String>,
     label: Option<String>,
     signal: Option<ExitSignal>,
 }
@@ -42,12 +43,19 @@ struct ExitConfig {
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Entry {
     Button {
+        #[serde(default)]
+        id: Option<String>,
         label: String,
         #[serde(default)]
         icon: String,
+        #[serde(default)]
         command: String,
+        #[serde(default)]
+        exit: bool,
     },
     Toggle {
+        #[serde(default)]
+        id: Option<String>,
         label: String,
         #[serde(default)]
         icon: String,
@@ -58,38 +66,79 @@ pub(crate) enum Entry {
     Separator {},
 }
 
+impl Entry {
+    pub(crate) fn id(&self) -> Option<&str> {
+        match self {
+            Entry::Button { id, .. } | Entry::Toggle { id, .. } => id.as_deref(),
+            Entry::Separator {} => None,
+        }
+    }
+}
+
 // serde cannot default a missing enum tag, so each entry is read as a table first.
 fn entries<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Entry>, D::Error> {
     use serde::de::Error;
     Vec::<toml::Table>::deserialize(deserializer)?
         .into_iter()
         .enumerate()
-        .map(|(index, mut table)| {
+        .map(|(index, table)| {
             let kind = table
-                .entry("type")
-                .or_insert_with(|| "button".into())
-                .as_str()
-                .unwrap_or("?")
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("button")
                 .to_owned();
-            let fail = |message: String| {
+            parse_entry(table).map_err(|message| {
                 D::Error::custom(format!("entry {} ({kind}): {message}", index + 1))
-            };
-            let entry: Entry = toml::Value::Table(table)
-                .try_into()
-                .map_err(|e: toml::de::Error| fail(e.message().into()))?;
-            if let Entry::Button { label, command, .. } | Entry::Toggle { label, command, .. } =
-                &entry
-            {
-                if label.is_empty() {
-                    return Err(fail("label is empty".into()));
-                }
-                if command.is_empty() {
-                    return Err(fail("command is empty".into()));
-                }
-            }
-            Ok(entry)
+            })
         })
         .collect()
+}
+
+pub(crate) fn parse_entry(mut table: toml::Table) -> Result<Entry, String> {
+    table.entry("type").or_insert_with(|| "button".into());
+    let entry: Entry = toml::Value::Table(table)
+        .try_into()
+        .map_err(|e: toml::de::Error| e.message().to_owned())?;
+    match &entry {
+        Entry::Button { label, .. } | Entry::Toggle { label, .. } if label.is_empty() => {
+            Err("label is empty".into())
+        }
+        Entry::Button {
+            command,
+            exit: false,
+            ..
+        }
+        | Entry::Toggle { command, .. }
+            if command.is_empty() =>
+        {
+            Err("command is empty".into())
+        }
+        _ => Ok(entry),
+    }
+}
+
+pub(crate) fn validate_entries(entries: &[Entry], exit_id: &str) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::from([exit_id]);
+    for entry in entries {
+        if let Entry::Button {
+            id: None,
+            exit: true,
+            label,
+            ..
+        } = entry
+        {
+            return Err(format!("\"{label}\": exit = true needs an id"));
+        }
+        if let Some(id) = entry.id() {
+            if id.is_empty() {
+                return Err("id is empty".into());
+            }
+            if !seen.insert(id) {
+                return Err(format!("duplicate id \"{id}\""));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn load_config(name: &str, text: &str) -> Result<Config, String> {
@@ -124,14 +173,16 @@ pub(crate) struct Settings {
 }
 
 pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
+    let file = match &cli.config {
+        Some(p) if p == Path::new("-") => "stdin".into(),
+        Some(p) => p.display().to_string(),
+        None => String::new(),
+    };
     if config.exit.signal.is_some() && cli.pid.is_none() && cli.command.is_empty() {
-        let file = match &cli.config {
-            Some(p) if p == Path::new("-") => "stdin".into(),
-            Some(p) => p.display().to_string(),
-            None => String::new(),
-        };
         return Err(format!("{file}: exit.signal needs --pid or a command"));
     }
+    let exit_id = config.exit.id.unwrap_or_else(|| "exit".into());
+    validate_entries(&config.entries, &exit_id).map_err(|e| format!("{file}: {e}"))?;
     Ok(Settings {
         icon: cli
             .icon
@@ -173,11 +224,15 @@ mod tests {
     #[test]
     fn the_example_is_a_valid_config() {
         let config = load_config("example.toml", EXAMPLE).unwrap();
-        assert_eq!(config.entries.len(), 3);
+        assert_eq!(config.entries.len(), 4);
         assert!(matches!(config.entries[1], Entry::Separator {}));
         assert!(matches!(
             config.entries[2],
             Entry::Toggle { checked: false, .. }
+        ));
+        assert!(matches!(
+            config.entries[3],
+            Entry::Button { exit: true, .. }
         ));
         assert!(settings(&parse(&[]).unwrap(), config).is_ok());
     }
@@ -203,9 +258,11 @@ mod tests {
 
     fn button(label: &str, icon: &str, command: &str) -> Entry {
         Entry::Button {
+            id: None,
             label: label.into(),
             icon: icon.into(),
             command: command.into(),
+            exit: false,
         }
     }
 
@@ -213,6 +270,44 @@ mod tests {
     fn an_entry_without_type_is_a_button() {
         let config = config("[[entry]]\nlabel = \"Hi\"\ncommand = \"echo hi\"\n").unwrap();
         assert_eq!(config.entries, [button("Hi", "", "echo hi")]);
+    }
+
+    #[test]
+    fn reads_ids_and_exit_buttons() {
+        let config = config(
+            "[exit]\nid = \"stop\"\n\
+             [[entry]]\nid = \"discard\"\nlabel = \"Discard\"\nexit = true\n",
+        )
+        .unwrap();
+        assert_eq!(config.exit.id.as_deref(), Some("stop"));
+        assert_eq!(
+            config.entries,
+            [Entry::Button {
+                id: Some("discard".into()),
+                label: "Discard".into(),
+                icon: String::new(),
+                command: String::new(),
+                exit: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn validates_ids_and_exit_buttons() {
+        let settings_of =
+            |text: &str| settings(&parse(&["--icon", "x"]).unwrap(), config(text).unwrap());
+        for text in [
+            "[[entry]]\nid = \"a\"\nlabel = \"A\"\ncommand = \"a\"\n[[entry]]\nid = \"a\"\nlabel = \"B\"\ncommand = \"b\"\n",
+            "[[entry]]\nid = \"exit\"\nlabel = \"A\"\ncommand = \"a\"\n",
+            "[[entry]]\nlabel = \"A\"\nexit = true\n",
+            "[[entry]]\nid = \"\"\nlabel = \"A\"\ncommand = \"a\"\n",
+        ] {
+            assert!(settings_of(text).is_err(), "accepted: {text}");
+        }
+        assert!(settings_of(
+            "[exit]\nid = \"stop\"\n[[entry]]\nid = \"exit\"\nlabel = \"A\"\nexit = true\n",
+        )
+        .is_ok());
     }
 
     #[test]
@@ -227,6 +322,7 @@ mod tests {
             config.entries,
             [
                 Entry::Toggle {
+                    id: None,
                     label: "T".into(),
                     icon: String::new(),
                     command: "t $1".into(),
@@ -272,6 +368,8 @@ mod tests {
             "[[entry]]\ntype = \"menu\"\nlabel = \"M\"\n",
             "[[entry]]\ntype = \"label\"\nlabel = \"L\"\n",
             "[[entry]]\ntype = \"radio\"\nlabel = \"R\"\ncommand = \"r\"\n",
+            "[[entry]]\ntype = \"toggle\"\nid = \"t\"\nlabel = \"T\"\ncommand = \"t\"\nexit = true\n",
+            "[[entry]]\ntype = \"separator\"\nid = \"s\"\n",
         ] {
             assert!(config(text).is_err(), "accepted: {text}");
         }
