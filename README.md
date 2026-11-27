@@ -101,6 +101,12 @@ command = 'gsr pause $1 && trayler ctl "$TRAYLER_CONTROL" icon media-playback-pa
 nix build        # or: cargo build --release
 ```
 
+Flakes can add `trayler` to their package set with the overlay:
+
+```nix
+nixpkgs.overlays = [ inputs.trayler.overlays.default ];
+```
+
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE) or, at your option, any later version.

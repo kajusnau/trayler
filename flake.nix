@@ -13,8 +13,13 @@
     in
     {
       packages = forAllSystems (system: {
-        default = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+        trayler = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+        default = self.packages.${system}.trayler;
       });
+
+      overlays.default = final: prev: {
+        trayler = final.callPackage ./package.nix { };
+      };
 
       devShells = forAllSystems (
         system:
