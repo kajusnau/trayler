@@ -37,6 +37,7 @@ pub(crate) struct Config {
 struct ExitConfig {
     id: Option<String>,
     label: Option<String>,
+    icon: Option<String>,
     signal: Option<ExitSignal>,
 }
 
@@ -185,6 +186,7 @@ pub(crate) struct Settings {
     pub(crate) title: String,
     pub(crate) entries: Vec<Entry>,
     pub(crate) exit_label: String,
+    pub(crate) exit_icon: String,
     pub(crate) exit_signal: ExitSignal,
     pub(crate) exit_id: String,
     pub(crate) control: Option<PathBuf>,
@@ -218,6 +220,7 @@ pub(crate) fn settings(cli: &Cli, config: Config) -> Result<Settings, String> {
             .clone()
             .or(config.exit.label)
             .unwrap_or_else(|| "Exit".into()),
+        exit_icon: config.exit.icon.unwrap_or_default(),
         exit_signal: cli
             .exit_signal
             .or(config.exit.signal)
@@ -464,13 +467,14 @@ mod tests {
     fn the_config_alone_supplies_settings() {
         let cli = parse(&["--pid", "1"]).unwrap();
         let file = config(
-            "icon = \"file\"\ntitle = \"file\"\ncontrol = \"file\"\n[exit]\nlabel = \"file\"\nsignal = \"INT\"\n",
+            "icon = \"file\"\ntitle = \"file\"\ncontrol = \"file\"\n[exit]\nlabel = \"file\"\nicon = \"file\"\nsignal = \"INT\"\n",
         )
         .unwrap();
         let settings = settings(&cli, file).unwrap();
         assert_eq!(settings.icon, "file");
         assert_eq!(settings.title, "file");
         assert_eq!(settings.exit_label, "file");
+        assert_eq!(settings.exit_icon, "file");
         assert_eq!(settings.exit_signal, ExitSignal::Int);
         assert_eq!(settings.control.as_deref(), Some(Path::new("file")));
     }

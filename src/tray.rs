@@ -34,6 +34,7 @@ pub(crate) struct Trayler {
     pub(crate) title: String,
     pub(crate) entries: Vec<Entry>,
     pub(crate) exit_label: String,
+    pub(crate) exit_icon: String,
     pub(crate) exit_id: String,
     pub(crate) exit_signal: Signal,
     pub(crate) quit: mpsc::UnboundedSender<String>,
@@ -155,6 +156,7 @@ impl ksni::Tray for Trayler {
         items.push(
             StandardItem {
                 label: menu_label(&self.exit_label),
+                icon_name: self.exit_icon.clone(),
                 activate: Box::new(|this: &mut Self| this.exit(&this.exit_id.clone())),
                 ..Default::default()
             }
@@ -194,6 +196,7 @@ mod tests {
             title: String::new(),
             entries,
             exit_label: "Exit".into(),
+            exit_icon: String::new(),
             exit_id: "exit".into(),
             exit_signal: Signal::TERM,
             quit,
@@ -255,6 +258,16 @@ mod tests {
         let (tray, _) = tray(vec![label], None);
         match ksni::Tray::menu(&tray).swap_remove(0) {
             MenuItem::Standard(item) => assert!(!item.enabled),
+            _ => panic!("not a standard item"),
+        }
+    }
+
+    #[test]
+    fn the_exit_entry_shows_its_icon() {
+        let (mut tray, _) = tray(vec![], None);
+        tray.exit_icon = "system-shutdown".into();
+        match ksni::Tray::menu(&tray).swap_remove(0) {
+            MenuItem::Standard(item) => assert_eq!(item.icon_name, "system-shutdown"),
             _ => panic!("not a standard item"),
         }
     }

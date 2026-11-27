@@ -14,6 +14,7 @@ title = "trayler"
 # that process; otherwise it closes trayler.
 [exit]
 label = "Exit"
+# icon = "system-shutdown-symbolic"
 # Printed to stdout when this entry ends the session.
 # id = "exit"
 # TERM (default), INT, HUP, QUIT, KILL, USR1 or USR2. Only with --pid or a command.

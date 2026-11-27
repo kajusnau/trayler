@@ -85,6 +85,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         title: settings.title,
         entries: settings.entries,
         exit_label: settings.exit_label,
+        exit_icon: settings.exit_icon,
         exit_id: settings.exit_id,
         exit_signal,
         quit,

@@ -135,10 +135,17 @@ pub(crate) fn apply(tray: &mut Trayler, command: Command) -> Result<(), String> 
     match command {
         Command::Icon(icon) => tray.icon = icon,
         Command::Title(title) => tray.title = title,
-        Command::Set { id, pairs } if id == tray.exit_id => match pairs.as_slice() {
-            [(key, label)] if key == "label" => tray.exit_label = label.clone(),
-            _ => return Err("only the label of the exit entry can be set".into()),
-        },
+        Command::Set { id, pairs } if id == tray.exit_id => {
+            let (mut label, mut icon) = (tray.exit_label.clone(), tray.exit_icon.clone());
+            for (key, value) in pairs {
+                match key.as_str() {
+                    "label" => label = value,
+                    "icon" => icon = value,
+                    _ => return Err("only the label and icon of the exit entry can be set".into()),
+                }
+            }
+            (tray.exit_label, tray.exit_icon) = (label, icon);
+        }
         Command::Set { id, pairs } => {
             if let Some((key, _)) = pairs.iter().find(|(key, _)| {
                 ![
@@ -335,6 +342,7 @@ mod tests {
             title: "t".into(),
             entries,
             exit_label: "Exit".into(),
+            exit_icon: String::new(),
             exit_id: "exit".into(),
             exit_signal: Signal::TERM,
             quit: mpsc::unbounded_channel().0,
@@ -356,14 +364,15 @@ mod tests {
         run(&mut tray, "icon j").unwrap();
         run(&mut tray, "title \"T 2\"").unwrap();
         run(&mut tray, "set a label=M icon=k").unwrap();
-        run(&mut tray, "set exit label=Stop").unwrap();
+        run(&mut tray, "set exit label=Stop icon=x").unwrap();
         assert_eq!(
             (
                 tray.icon.as_str(),
                 tray.title.as_str(),
-                tray.exit_label.as_str()
+                tray.exit_label.as_str(),
+                tray.exit_icon.as_str()
             ),
-            ("j", "T 2", "Stop")
+            ("j", "T 2", "Stop", "x")
         );
         assert!(
             matches!(&tray.entries[0], Entry::Button { label, icon, .. } if label == "M" && icon == "k")
@@ -395,7 +404,7 @@ mod tests {
             "set a id=b",
             "set a label=",
             "set a checked=true",
-            "set exit icon=x",
+            "set exit icon=x command=y",
             "add label=X command=x",
             "add id=a label=X command=x",
             "add id=exit label=X command=x",
@@ -410,6 +419,7 @@ mod tests {
         }
         assert_eq!(tray.entries, [button("a")]);
         assert_eq!(tray.exit_label, "Exit");
+        assert_eq!(tray.exit_icon, "");
     }
 
     #[test]

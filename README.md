@@ -65,7 +65,7 @@ The menu lists the entries top to bottom as they are written in the config, then
 | `label`              | `id`, `label`, `icon` | a line of text that cannot be clicked |
 | `separator`          | none                                    | a separator line                                                  |
 
-`control` (the same as `--control`) can also be set at the top level of the config. `[exit]` takes `label`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
+`control` (the same as `--control`) can also be set at the top level of the config. `[exit]` takes `label`, `icon`, `id` (default `exit`) and `signal` (same values as `--exit-signal`, only with `--pid` or a command). With
 `--config -` the config is read from stdin, so a command started after `--` gets an empty stdin.
 
 When the session ends through a menu entry, trayler prints that entry's `id` on stdout (after its own PID when it printed one). Nothing is printed when the followed process ends by itself or trayler is stopped by a signal. Exit codes are unchanged.
@@ -78,7 +78,7 @@ With `--control PATH` (or `control` in the config), trayler listens on a Unix so
 | -------------------------------- | -------------------------------------------------------------------------------------------- |
 | `icon NAME`                      | change the icon                                                                              |
 | `title TEXT`                     | change the title and tooltip                                                                 |
-| `set ID KEY=VALUE...`            | change `label`, `icon`, `checked`, `label_checked`, `icon_checked` or `command` of an entry; for the exit entry only `label` |
+| `set ID KEY=VALUE...`            | change `label`, `icon`, `checked`, `label_checked`, `icon_checked` or `command` of an entry; for the exit entry only `label` and `icon` |
 | `add KEY=VALUE... [after=ID\|before=ID]` | add an entry, just above Exit unless `after` or `before` is given; it needs an `id`             |
 | `remove ID`                      | remove an entry; the exit entry cannot be removed                                            |
 
